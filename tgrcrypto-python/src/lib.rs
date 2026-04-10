@@ -26,7 +26,7 @@ fn copy_array<const N: usize>(value: &[u8], label: &str) -> PyResult<[u8; N]> {
 
 /// Ensure block cipher input is aligned to the AES block size.
 fn ensure_block_aligned(data: &[u8]) -> PyResult<()> {
-    if !data.len().is_multiple_of(AES_BLOCK_SIZE) {
+    if data.len() % AES_BLOCK_SIZE != 0 {
         return Err(PyValueError::new_err(format!(
             "Data length must be a multiple of {AES_BLOCK_SIZE} bytes"
         )));
