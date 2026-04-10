@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "High-performance Telegram cryptography library in Rust"
+rust-version = "1.70"
 
 [features]
 default = ["aesni"]

@@ -64,7 +64,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v6
@@ -81,10 +81,52 @@ jobs:
           python-version: ${{ matrix.python }}
 
       - name: Install maturin
-        run: pip install "maturin[patchelf]"
+        run: pip install "maturin>=1.12.0,<2.0"
 
       - name: Build Wheel & Smoke Test
         run: |
           maturin build --release
           pip install target/wheels/*.whl
           python -c "import tgcrypto; print('TgrCrypto loaded successfully')"
+        
+      - name: Run Python Integration Tests
+        run: |
+          python -c "
+          import tgcrypto
+          import os
+          
+          # Test IGE-256
+          data = os.urandom(1024)
+          key = os.urandom(32)
+          iv = os.urandom(32)
+          enc = tgcrypto.ige256_encrypt(data, key, iv)
+          dec = tgcrypto.ige256_decrypt(enc, key, iv)
+          assert dec == data, 'IGE-256 failed'
+          
+          # Test CTR-256
+          data = os.urandom(1024)
+          key = os.urandom(32)
+          iv = os.urandom(16)
+          state = bytes(1)
+          enc = tgcrypto.ctr256_encrypt(data, key, iv, state)
+          dec = tgcrypto.ctr256_decrypt(enc, key, iv, state)
+          assert dec == data, 'CTR-256 failed'
+          
+          # Test CBC-256
+          data = os.urandom(1024)
+          key = os.urandom(32)
+          iv = os.urandom(16)
+          enc = tgcrypto.cbc256_encrypt(data, key, iv)
+          dec = tgcrypto.cbc256_decrypt(enc, key, iv)
+          assert dec == data, 'CBC-256 failed'
+          
+          # Test streaming CTR
+          key = os.urandom(32)
+          iv = os.urandom(16)
+          stream = tgcrypto.Ctr256(key, iv)
+          chunk1 = stream.update(data[:512])
+          chunk2 = stream.update(data[512:])
+          assert chunk1 + chunk2 == enc, 'CTR streaming failed'
+          
+          print('All tests passed!')
+          "

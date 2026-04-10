@@ -12,7 +12,7 @@
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.9–3.14
 - Rust 1.70+ (build from source only)
 
 ## Installation

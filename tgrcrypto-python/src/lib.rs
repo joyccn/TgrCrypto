@@ -7,12 +7,21 @@
 //! - `ctr256_decrypt(data, key, iv, state) -> bytes`
 //! - `cbc256_encrypt(data, key, iv) -> bytes`
 //! - `cbc256_decrypt(data, key, iv) -> bytes`
+//! - `Ctr256` - Stateful CTR stream cipher class
+//! - `Ige256` - Stateful IGE stream cipher class
+//!
+//! Supports Python 3.9–3.14.
 
 use core::slice;
 use pyo3::exceptions::{PyMemoryError, PyValueError};
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+
+/// Create a Python ValueError with a formatted message.
+fn value_error(msg: impl Into<String>) -> PyErr {
+    PyValueError::new_err(msg.into())
+}
 
 /// Zero-copy PyBytes allocation with GIL release.
 ///
@@ -47,6 +56,20 @@ where
 }
 
 /// AES-256-IGE encryption.
+///
+/// Encrypts data using AES-256 in Infinite Garble Extension (IGE) mode.
+/// This mode is used by Telegram MTProto v2.0 for message encryption.
+///
+/// # Arguments
+/// * `data` - Plaintext to encrypt (must be multiple of 16 bytes)
+/// * `key` - 32-byte encryption key
+/// * `iv` - 32-byte initial value
+///
+/// # Returns
+/// Encrypted ciphertext as bytes
+///
+/// # Raises
+/// * `ValueError` - If data is empty, not a multiple of 16 bytes, or key/IV sizes are incorrect
 #[pyfunction]
 #[pyo3(signature = (data, key, iv))]
 fn ige256_encrypt<'py>(
@@ -56,18 +79,25 @@ fn ige256_encrypt<'py>(
     iv: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
     if data.is_empty() {
-        return Err(PyValueError::new_err("Data must not be empty"));
+        return Err(value_error("Data must not be empty"));
     }
-    if !data.len().is_multiple_of(16) {
-        return Err(PyValueError::new_err(
-            "Data size must match a multiple of 16 bytes",
-        ));
+    if data.len() % 16 != 0 {
+        return Err(value_error(format!(
+            "Data size must be a multiple of 16 bytes, got {} bytes",
+            data.len()
+        )));
     }
     if key.len() != 32 {
-        return Err(PyValueError::new_err("Key size must be exactly 32 bytes"));
+        return Err(value_error(format!(
+            "Key size must be exactly 32 bytes, got {} bytes",
+            key.len()
+        )));
     }
     if iv.len() != 32 {
-        return Err(PyValueError::new_err("IV size must be exactly 32 bytes"));
+        return Err(value_error(format!(
+            "IV size must be exactly 32 bytes, got {} bytes",
+            iv.len()
+        )));
     }
 
     let key_arr: &[u8; 32] = key.try_into().unwrap();
@@ -79,6 +109,19 @@ fn ige256_encrypt<'py>(
 }
 
 /// AES-256-IGE decryption.
+///
+/// Decrypts data using AES-256 in Infinite Garble Extension (IGE) mode.
+///
+/// # Arguments
+/// * `data` - Ciphertext to decrypt (must be multiple of 16 bytes)
+/// * `key` - 32-byte decryption key
+/// * `iv` - 32-byte initial value (same as used for encryption)
+///
+/// # Returns
+/// Decrypted plaintext as bytes
+///
+/// # Raises
+/// * `ValueError` - If data is empty, not a multiple of 16 bytes, or key/IV sizes are incorrect
 #[pyfunction]
 #[pyo3(signature = (data, key, iv))]
 fn ige256_decrypt<'py>(
@@ -88,18 +131,25 @@ fn ige256_decrypt<'py>(
     iv: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
     if data.is_empty() {
-        return Err(PyValueError::new_err("Data must not be empty"));
+        return Err(value_error("Data must not be empty"));
     }
-    if !data.len().is_multiple_of(16) {
-        return Err(PyValueError::new_err(
-            "Data size must match a multiple of 16 bytes",
-        ));
+    if data.len() % 16 != 0 {
+        return Err(value_error(format!(
+            "Data size must be a multiple of 16 bytes, got {} bytes",
+            data.len()
+        )));
     }
     if key.len() != 32 {
-        return Err(PyValueError::new_err("Key size must be exactly 32 bytes"));
+        return Err(value_error(format!(
+            "Key size must be exactly 32 bytes, got {} bytes",
+            key.len()
+        )));
     }
     if iv.len() != 32 {
-        return Err(PyValueError::new_err("IV size must be exactly 32 bytes"));
+        return Err(value_error(format!(
+            "IV size must be exactly 32 bytes, got {} bytes",
+            iv.len()
+        )));
     }
 
     let key_arr: &[u8; 32] = key.try_into().unwrap();
@@ -111,6 +161,21 @@ fn ige256_decrypt<'py>(
 }
 
 /// AES-256-CTR encryption.
+///
+/// Encrypts data using AES-256 in Counter (CTR) mode.
+/// This mode supports arbitrary length data and is used for CDN encrypted file downloads.
+///
+/// # Arguments
+/// * `data` - Plaintext to encrypt (arbitrary length)
+/// * `key` - 32-byte encryption key
+/// * `iv` - 16-byte initial counter value
+/// * `state` - 1-byte counter state (0-15), usually starts at 0
+///
+/// # Returns
+/// Encrypted ciphertext as bytes
+///
+/// # Raises
+/// * `ValueError` - If data is empty, or key/IV/state sizes are incorrect
 #[pyfunction]
 #[pyo3(signature = (data, key, iv, state))]
 fn ctr256_encrypt<'py>(
@@ -121,21 +186,31 @@ fn ctr256_encrypt<'py>(
     state: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
     if data.is_empty() {
-        return Err(PyValueError::new_err("Data must not be empty"));
+        return Err(value_error("Data must not be empty"));
     }
     if key.len() != 32 {
-        return Err(PyValueError::new_err("Key size must be exactly 32 bytes"));
+        return Err(value_error(format!(
+            "Key size must be exactly 32 bytes, got {} bytes",
+            key.len()
+        )));
     }
     if iv.len() != 16 {
-        return Err(PyValueError::new_err("IV size must be exactly 16 bytes"));
+        return Err(value_error(format!(
+            "IV size must be exactly 16 bytes, got {} bytes",
+            iv.len()
+        )));
     }
     if state.len() != 1 {
-        return Err(PyValueError::new_err("State size must be exactly 1 byte"));
+        return Err(value_error(format!(
+            "State size must be exactly 1 byte, got {} bytes",
+            state.len()
+        )));
     }
     if state[0] > 15 {
-        return Err(PyValueError::new_err(
-            "State value must be in the range [0, 15]",
-        ));
+        return Err(value_error(format!(
+            "State value must be in the range [0, 15], got {}",
+            state[0]
+        )));
     }
 
     let key_arr: &[u8; 32] = key.try_into().unwrap();
@@ -148,6 +223,21 @@ fn ctr256_encrypt<'py>(
 }
 
 /// AES-256-CTR decryption (symmetric with encrypt).
+///
+/// Decrypts data using AES-256 in Counter (CTR) mode.
+/// CTR mode is symmetric - encryption and decryption use the same operation.
+///
+/// # Arguments
+/// * `data` - Ciphertext to decrypt (arbitrary length)
+/// * `key` - 32-byte decryption key
+/// * `iv` - 16-byte initial counter value
+/// * `state` - 1-byte counter state (0-15), usually starts at 0
+///
+/// # Returns
+/// Decrypted plaintext as bytes
+///
+/// # Raises
+/// * `ValueError` - If data is empty, or key/IV/state sizes are incorrect
 #[pyfunction]
 #[pyo3(signature = (data, key, iv, state))]
 fn ctr256_decrypt<'py>(
@@ -161,6 +251,20 @@ fn ctr256_decrypt<'py>(
 }
 
 /// AES-256-CBC encryption.
+///
+/// Encrypts data using AES-256 in Cipher Block Chaining (CBC) mode.
+/// This mode is used for encrypted passport credentials in Telegram.
+///
+/// # Arguments
+/// * `data` - Plaintext to encrypt (must be multiple of 16 bytes)
+/// * `key` - 32-byte encryption key
+/// * `iv` - 16-byte initial value
+///
+/// # Returns
+/// Encrypted ciphertext as bytes
+///
+/// # Raises
+/// * `ValueError` - If data is empty, not a multiple of 16 bytes, or key/IV sizes are incorrect
 #[pyfunction]
 #[pyo3(signature = (data, key, iv))]
 fn cbc256_encrypt<'py>(
@@ -170,18 +274,25 @@ fn cbc256_encrypt<'py>(
     iv: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
     if data.is_empty() {
-        return Err(PyValueError::new_err("Data must not be empty"));
+        return Err(value_error("Data must not be empty"));
     }
-    if !data.len().is_multiple_of(16) {
-        return Err(PyValueError::new_err(
-            "Data size must match a multiple of 16 bytes",
-        ));
+    if data.len() % 16 != 0 {
+        return Err(value_error(format!(
+            "Data size must be a multiple of 16 bytes, got {} bytes",
+            data.len()
+        )));
     }
     if key.len() != 32 {
-        return Err(PyValueError::new_err("Key size must be exactly 32 bytes"));
+        return Err(value_error(format!(
+            "Key size must be exactly 32 bytes, got {} bytes",
+            key.len()
+        )));
     }
     if iv.len() != 16 {
-        return Err(PyValueError::new_err("IV size must be exactly 16 bytes"));
+        return Err(value_error(format!(
+            "IV size must be exactly 16 bytes, got {} bytes",
+            iv.len()
+        )));
     }
 
     let key_arr: &[u8; 32] = key.try_into().unwrap();
@@ -193,6 +304,19 @@ fn cbc256_encrypt<'py>(
 }
 
 /// AES-256-CBC decryption.
+///
+/// Decrypts data using AES-256 in Cipher Block Chaining (CBC) mode.
+///
+/// # Arguments
+/// * `data` - Ciphertext to decrypt (must be multiple of 16 bytes)
+/// * `key` - 32-byte decryption key
+/// * `iv` - 16-byte initial value (same as used for encryption)
+///
+/// # Returns
+/// Decrypted plaintext as bytes
+///
+/// # Raises
+/// * `ValueError` - If data is empty, not a multiple of 16 bytes, or key/IV sizes are incorrect
 #[pyfunction]
 #[pyo3(signature = (data, key, iv))]
 fn cbc256_decrypt<'py>(
@@ -202,18 +326,25 @@ fn cbc256_decrypt<'py>(
     iv: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
     if data.is_empty() {
-        return Err(PyValueError::new_err("Data must not be empty"));
+        return Err(value_error("Data must not be empty"));
     }
-    if !data.len().is_multiple_of(16) {
-        return Err(PyValueError::new_err(
-            "Data size must match a multiple of 16 bytes",
-        ));
+    if data.len() % 16 != 0 {
+        return Err(value_error(format!(
+            "Data size must be a multiple of 16 bytes, got {} bytes",
+            data.len()
+        )));
     }
     if key.len() != 32 {
-        return Err(PyValueError::new_err("Key size must be exactly 32 bytes"));
+        return Err(value_error(format!(
+            "Key size must be exactly 32 bytes, got {} bytes",
+            key.len()
+        )));
     }
     if iv.len() != 16 {
-        return Err(PyValueError::new_err("IV size must be exactly 16 bytes"));
+        return Err(value_error(format!(
+            "IV size must be exactly 16 bytes, got {} bytes",
+            iv.len()
+        )));
     }
 
     let key_arr: &[u8; 32] = key.try_into().unwrap();
@@ -225,6 +356,16 @@ fn cbc256_decrypt<'py>(
 }
 
 /// Stateful AES-256-CTR stream cipher.
+///
+/// This class maintains internal state across multiple `update()` calls,
+/// allowing incremental encryption/decryption of data streams.
+///
+/// Example:
+///     >>> key = os.urandom(32)
+///     >>> iv = os.urandom(16)
+///     >>> stream = tgcrypto.Ctr256(key, iv)
+///     >>> chunk1 = stream.update(data[:512])
+///     >>> chunk2 = stream.update(data[512:])
 #[pyclass]
 struct Ctr256 {
     key: [u8; 32],
@@ -234,14 +375,19 @@ struct Ctr256 {
 
 #[pymethods]
 impl Ctr256 {
+    /// Create a new CTR-256 stream cipher.
+    ///
+    /// # Arguments
+    /// * `key` - 32-byte encryption key
+    /// * `iv` - 16-byte initial counter value
     #[new]
     fn new(key: &[u8], iv: &[u8]) -> PyResult<Self> {
         let key_arr: [u8; 32] = key
             .try_into()
-            .map_err(|_| PyValueError::new_err("Key must be 32 bytes"))?;
+            .map_err(|_| value_error("Key must be exactly 32 bytes"))?;
         let iv_arr: [u8; 16] = iv
             .try_into()
-            .map_err(|_| PyValueError::new_err("IV must be 16 bytes"))?;
+            .map_err(|_| value_error("IV must be exactly 16 bytes"))?;
         Ok(Ctr256 {
             key: key_arr,
             iv: iv_arr,
@@ -249,6 +395,10 @@ impl Ctr256 {
         })
     }
 
+    /// Encrypt/decrypt a chunk of data, updating internal state.
+    ///
+    /// # Arguments
+    /// * `data` - Data to process (arbitrary length)
     fn update<'py>(&mut self, py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
         let key_arr = self.key;
         let mut iv_arr = self.iv;
@@ -264,6 +414,19 @@ impl Ctr256 {
     }
 }
 
+/// Stateful AES-256-IGE stream cipher.
+///
+/// This class maintains IV state across multiple `encrypt()`/`decrypt()` calls,
+/// allowing incremental processing of data in IGE mode.
+///
+/// Note: IGE mode requires data to be a multiple of 16 bytes.
+///
+/// Example:
+///     >>> key = os.urandom(32)
+///     >>> iv = os.urandom(32)
+///     >>> stream = tgcrypto.Ige256(key, iv)
+///     >>> chunk1 = stream.encrypt(data[:1024])
+///     >>> chunk2 = stream.encrypt(data[1024:])
 #[pyclass]
 struct Ige256 {
     key: [u8; 32],
@@ -272,25 +435,35 @@ struct Ige256 {
 
 #[pymethods]
 impl Ige256 {
+    /// Create a new IGE-256 stream cipher.
+    ///
+    /// # Arguments
+    /// * `key` - 32-byte encryption key
+    /// * `iv` - 32-byte initial value (two 16-byte IVs concatenated)
     #[new]
     fn new(key: &[u8], iv: &[u8]) -> PyResult<Self> {
         let key_arr: [u8; 32] = key
             .try_into()
-            .map_err(|_| PyValueError::new_err("Key must be 32 bytes"))?;
+            .map_err(|_| value_error("Key must be exactly 32 bytes"))?;
         let iv_arr: [u8; 32] = iv
             .try_into()
-            .map_err(|_| PyValueError::new_err("IV must be 32 bytes"))?;
+            .map_err(|_| value_error("IV must be exactly 32 bytes"))?;
         Ok(Ige256 {
             key: key_arr,
             iv: iv_arr,
         })
     }
 
+    /// Encrypt a chunk of data, updating IV state.
+    ///
+    /// # Arguments
+    /// * `data` - Data to encrypt (must be multiple of 16 bytes)
     fn encrypt<'py>(&mut self, py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
-        if !data.len().is_multiple_of(16) {
-            return Err(PyValueError::new_err(
-                "Data size must match a multiple of 16 bytes",
-            ));
+        if data.len() % 16 != 0 {
+            return Err(value_error(format!(
+                "Data size must be a multiple of 16 bytes, got {} bytes",
+                data.len()
+            )));
         }
         let key_arr = self.key;
         let mut iv_arr = self.iv;
@@ -303,11 +476,16 @@ impl Ige256 {
         Ok(res)
     }
 
+    /// Decrypt a chunk of data, updating IV state.
+    ///
+    /// # Arguments
+    /// * `data` - Data to decrypt (must be multiple of 16 bytes)
     fn decrypt<'py>(&mut self, py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
-        if !data.len().is_multiple_of(16) {
-            return Err(PyValueError::new_err(
-                "Data size must match a multiple of 16 bytes",
-            ));
+        if data.len() % 16 != 0 {
+            return Err(value_error(format!(
+                "Data size must be a multiple of 16 bytes, got {} bytes",
+                data.len()
+            )));
         }
         let key_arr = self.key;
         let mut iv_arr = self.iv;
@@ -322,6 +500,27 @@ impl Ige256 {
 }
 
 /// TgrCrypto Python module.
+///
+/// High-performance, AES-NI accelerated drop-in replacement for TgCrypto.
+///
+/// This module provides three cipher modes:
+/// - **IGE-256**: Used by Telegram MTProto v2.0 for message encryption
+/// - **CTR-256**: Used for CDN encrypted file downloads (supports arbitrary length data)
+/// - **CBC-256**: Used for encrypted passport credentials
+///
+/// All functions operate on bytes-like objects and return bytes.
+/// The library automatically uses AES-NI hardware acceleration when available.
+///
+/// Example:
+///     >>> import tgcrypto
+///     >>> import os
+///     >>> data = os.urandom(1024)
+///     >>> key = os.urandom(32)
+///     >>> iv = os.urandom(32)
+///     >>> encrypted = tgcrypto.ige256_encrypt(data, key, iv)
+///     >>> decrypted = tgcrypto.ige256_decrypt(encrypted, key, iv)
+///     >>> decrypted == data
+///     True
 #[pymodule]
 fn tgcrypto(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ige256_encrypt, m)?)?;

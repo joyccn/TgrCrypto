@@ -9,7 +9,7 @@ use crate::aes256::{self, ExpandedKey, AES_BLOCK_SIZE};
 pub fn ige256_encrypt_into(data: &[u8], key: &[u8; 32], iv: &mut [u8; 32], dest: &mut [u8]) {
     let len = data.len();
     assert_eq!(len, dest.len(), "Source and destination lengths must match");
-    if len == 0 || !len.is_multiple_of(AES_BLOCK_SIZE) {
+    if len == 0 || len % AES_BLOCK_SIZE != 0 {
         return;
     }
 
@@ -47,7 +47,7 @@ pub fn ige256_encrypt_into(data: &[u8], key: &[u8; 32], iv: &mut [u8; 32], dest:
 pub fn ige256_decrypt_into(data: &[u8], key: &[u8; 32], iv: &mut [u8; 32], dest: &mut [u8]) {
     let len = data.len();
     assert_eq!(len, dest.len(), "Source and destination lengths must match");
-    if len == 0 || !len.is_multiple_of(AES_BLOCK_SIZE) {
+    if len == 0 || len % AES_BLOCK_SIZE != 0 {
         return;
     }
 
