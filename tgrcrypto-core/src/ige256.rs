@@ -114,4 +114,23 @@ mod tests {
 
         assert_eq!(data, decrypted);
     }
+
+    #[test]
+    fn test_ige_chunked_matches_one_shot() {
+        let key = [0x42u8; 32];
+        let iv = [0x24u8; 32];
+        let data: Vec<u8> = (0..96).map(|i| (i & 0xff) as u8).collect();
+
+        let one_shot = ige256_encrypt(&data, &key, &iv);
+
+        let mut chunked_iv = iv;
+        let mut chunked = Vec::with_capacity(data.len());
+        for chunk in data.chunks(16) {
+            let mut out = vec![0u8; chunk.len()];
+            ige256_encrypt_into(chunk, &key, &mut chunked_iv, &mut out);
+            chunked.extend(out);
+        }
+
+        assert_eq!(one_shot, chunked);
+    }
 }

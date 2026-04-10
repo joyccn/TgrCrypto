@@ -138,3 +138,23 @@ pub fn cbc256_decrypt(data: &[u8], key: &[u8; 32], iv: &mut [u8; 16]) -> Vec<u8>
     cbc256_decrypt_into(data, key, iv, &mut out);
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cbc256_roundtrip() {
+        let key = [0x42u8; 32];
+        let iv = [0x24u8; 16];
+        let data: Vec<u8> = (0..128).map(|i| (i & 0xff) as u8).collect();
+
+        let mut enc_iv = iv;
+        let encrypted = cbc256_encrypt(&data, &key, &mut enc_iv);
+
+        let mut dec_iv = iv;
+        let decrypted = cbc256_decrypt(&encrypted, &key, &mut dec_iv);
+
+        assert_eq!(data, decrypted);
+    }
+}

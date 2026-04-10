@@ -5,25 +5,25 @@
 [![CI](https://github.com/joyccn/tgrcrypto/actions/workflows/ci.yml/badge.svg)](https://github.com/joyccn/tgrcrypto/actions/workflows/ci.yml)
 ![Status](https://img.shields.io/badge/status-beta-orange)
 ![License](https://img.shields.io/badge/license-LGPL--3.0-blue)
-![Python](https://img.shields.io/badge/python-3.9%2B-brightgreen)
+![Python](https://img.shields.io/badge/python-3.9--3.14-brightgreen)
 
 > [!NOTE]
 > This project is currently in **beta**. The API is stable and compatible with TgCrypto, but it has not undergone a formal security audit.
 
 ## Requirements
 
-- Python 3.9+
-- Rust 1.70+ (build from source only)
+- Python 3.9 - 3.14
+- Rust 1.83+ (build from source only)
 
 ## Installation
 
 ```bash
-pip install maturin
-maturin develop --release
+uv sync --python 3.14
+uv run python -c "import tgcrypto; print('TgrCrypto loaded successfully')"
 
 # Or build a distributable wheel
-maturin build --release
-pip install target/wheels/tgrcrypto-*.whl
+uv build --wheel
+uv run python -m pip install dist/tgrcrypto-*.whl
 ```
 
 ## Usage
@@ -64,13 +64,30 @@ For incremental processing of large data:
 
 ```python
 import tgcrypto
+import os
 
 key = os.urandom(32)
 iv = os.urandom(16)
+data = os.urandom(1024)
 
 stream = tgcrypto.Ctr256(key, iv)
 chunk1 = stream.update(data[:512])
 chunk2 = stream.update(data[512:])
+```
+
+IGE also supports incremental block-aligned processing:
+
+```python
+import tgcrypto
+import os
+
+key = os.urandom(32)
+iv = os.urandom(32)
+data = os.urandom(1024)
+
+stream = tgcrypto.Ige256(key, iv)
+chunk1 = stream.encrypt(data[:512])
+chunk2 = stream.encrypt(data[512:])
 ```
 
 ## Compatibility
@@ -89,11 +106,15 @@ Function names, arguments, and return types are identical.
 # Run Rust tests
 cargo test --release
 
-# Build Python extension
-maturin develop --release
+# Run Python API tests on the default uv environment
+uv sync --python 3.14
+uv run python -m unittest discover -s tests -v
+
+# Build a wheel through the configured PEP 517 backend
+uv build --wheel
 
 # Run with clippy
-cargo clippy -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
 ## License

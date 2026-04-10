@@ -9,44 +9,98 @@
 //! - `cbc256_decrypt(data, key, iv) -> bytes`
 
 use core::slice;
-use pyo3::exceptions::{PyMemoryError, PyValueError};
+use pyo3::exceptions::{PyOverflowError, PyRuntimeError, PyValueError};
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
-/// Zero-copy PyBytes allocation with GIL release.
-///
-/// Allocates uninitialized Python bytes, releases the GIL,
-/// runs the cipher operation in-place, and returns the result.
-fn execute_zerocopy<'py, F>(py: Python<'py>, data: &[u8], f: F) -> PyResult<Bound<'py, PyBytes>>
-where
-    F: FnOnce(&mut [u8]) + Send,
-{
-    let len = data.len();
+const AES_BLOCK_SIZE: usize = 16;
 
-    let obj_ptr = unsafe { ffi::PyBytes_FromStringAndSize(std::ptr::null(), len as isize) };
-    if obj_ptr.is_null() {
-        return Err(PyMemoryError::new_err(
-            "Failed to allocate memory for ciphertext/plaintext",
-        ));
-    }
-
-    let dest_ptr = unsafe { ffi::PyBytes_AsString(obj_ptr) } as usize;
-
-    py.detach(move || {
-        // SAFETY: dest_ptr is valid for `len` bytes and exclusively owned.
-        let dest = unsafe { slice::from_raw_parts_mut(dest_ptr as *mut u8, len) };
-        f(dest);
-    });
-
-    unsafe {
-        let any = Bound::from_owned_ptr(py, obj_ptr);
-        let bytes: Bound<'py, PyBytes> = any.cast_into_unchecked();
-        Ok(bytes)
-    }
+/// Copy a Python bytes-like value into a fixed-size Rust array.
+fn copy_array<const N: usize>(value: &[u8], label: &str) -> PyResult<[u8; N]> {
+    value
+        .try_into()
+        .map_err(|_| PyValueError::new_err(format!("{label} must be exactly {N} bytes")))
 }
 
-/// AES-256-IGE encryption.
+/// Ensure block cipher input is aligned to the AES block size.
+fn ensure_block_aligned(data: &[u8]) -> PyResult<()> {
+    if !data.len().is_multiple_of(AES_BLOCK_SIZE) {
+        return Err(PyValueError::new_err(format!(
+            "Data length must be a multiple of {AES_BLOCK_SIZE} bytes"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate the single-byte CTR carry state.
+fn validate_ctr_state(state: &[u8]) -> PyResult<u8> {
+    let state = copy_array::<1>(state, "State")?[0];
+    if state > 15 {
+        return Err(PyValueError::new_err(
+            "State value must be in the range [0, 15]",
+        ));
+    }
+    Ok(state)
+}
+
+/// Zero-copy PyBytes allocation with GIL release and panic isolation.
+///
+/// Allocates uninitialized Python bytes, releases the GIL,
+/// runs the cipher operation in-place, and returns the result plus
+/// any auxiliary state produced by the operation.
+fn execute_zerocopy<'py, T, F>(
+    py: Python<'py>,
+    len: usize,
+    f: F,
+) -> PyResult<(Bound<'py, PyBytes>, T)>
+where
+    T: Send,
+    F: FnOnce(&mut [u8]) -> T + Send,
+{
+    let py_len: ffi::Py_ssize_t = len.try_into().map_err(|_| {
+        PyOverflowError::new_err("Data is too large to fit in a Python bytes object")
+    })?;
+
+    let obj_ptr = unsafe { ffi::PyBytes_FromStringAndSize(std::ptr::null(), py_len) };
+    let any = unsafe { Bound::from_owned_ptr_or_err(py, obj_ptr)? };
+    let dest_ptr = unsafe { ffi::PyBytes_AsString(any.as_ptr()) };
+    if dest_ptr.is_null() {
+        return Err(PyRuntimeError::new_err(
+            "Python bytes allocation succeeded but returned a null data pointer",
+        ));
+    }
+    let dest_addr = dest_ptr as usize;
+
+    let result = py.detach(move || {
+        // SAFETY: dest_ptr is valid for `len` bytes and exclusively owned.
+        let dest = unsafe { slice::from_raw_parts_mut(dest_addr as *mut u8, len) };
+        catch_unwind(AssertUnwindSafe(|| f(dest)))
+    });
+
+    let result = result.map_err(|_| {
+        PyRuntimeError::new_err("Unexpected internal failure while executing cipher operation")
+    })?;
+
+    let bytes: Bound<'py, PyBytes> = unsafe { any.cast_into_unchecked() };
+    Ok((bytes, result))
+}
+
+/// Encrypt bytes with AES-256-IGE.
+///
+/// Args:
+///     data: Plaintext bytes. Length must be a multiple of 16 bytes.
+///     key: AES-256 key, exactly 32 bytes.
+///     iv: Initial vector, exactly 32 bytes.
+///
+/// Returns:
+///     The encrypted ciphertext as `bytes`.
+///
+/// Raises:
+///     ValueError: If `data`, `key`, or `iv` have invalid lengths.
+///     OverflowError: If the requested output would exceed Python's `bytes` size limit.
+///     RuntimeError: If an unexpected internal error occurs.
 #[pyfunction]
 #[pyo3(signature = (data, key, iv))]
 fn ige256_encrypt<'py>(
@@ -55,30 +109,30 @@ fn ige256_encrypt<'py>(
     key: &[u8],
     iv: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
-    if data.is_empty() {
-        return Err(PyValueError::new_err("Data must not be empty"));
-    }
-    if !data.len().is_multiple_of(16) {
-        return Err(PyValueError::new_err(
-            "Data size must match a multiple of 16 bytes",
-        ));
-    }
-    if key.len() != 32 {
-        return Err(PyValueError::new_err("Key size must be exactly 32 bytes"));
-    }
-    if iv.len() != 32 {
-        return Err(PyValueError::new_err("IV size must be exactly 32 bytes"));
-    }
+    ensure_block_aligned(data)?;
+    let key_arr = copy_array::<32>(key, "Key")?;
+    let mut iv_arr = copy_array::<32>(iv, "IV")?;
 
-    let key_arr: &[u8; 32] = key.try_into().unwrap();
-    let mut iv_arr: [u8; 32] = iv.try_into().unwrap();
-
-    execute_zerocopy(py, data, move |dest| {
-        tgrcrypto_core::ige256_encrypt_into(data, key_arr, &mut iv_arr, dest);
-    })
+    let (bytes, _) = execute_zerocopy(py, data.len(), move |dest| {
+        tgrcrypto_core::ige256_encrypt_into(data, &key_arr, &mut iv_arr, dest);
+    })?;
+    Ok(bytes)
 }
 
-/// AES-256-IGE decryption.
+/// Decrypt bytes with AES-256-IGE.
+///
+/// Args:
+///     data: Ciphertext bytes. Length must be a multiple of 16 bytes.
+///     key: AES-256 key, exactly 32 bytes.
+///     iv: Initial vector, exactly 32 bytes.
+///
+/// Returns:
+///     The decrypted plaintext as `bytes`.
+///
+/// Raises:
+///     ValueError: If `data`, `key`, or `iv` have invalid lengths.
+///     OverflowError: If the requested output would exceed Python's `bytes` size limit.
+///     RuntimeError: If an unexpected internal error occurs.
 #[pyfunction]
 #[pyo3(signature = (data, key, iv))]
 fn ige256_decrypt<'py>(
@@ -87,30 +141,31 @@ fn ige256_decrypt<'py>(
     key: &[u8],
     iv: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
-    if data.is_empty() {
-        return Err(PyValueError::new_err("Data must not be empty"));
-    }
-    if !data.len().is_multiple_of(16) {
-        return Err(PyValueError::new_err(
-            "Data size must match a multiple of 16 bytes",
-        ));
-    }
-    if key.len() != 32 {
-        return Err(PyValueError::new_err("Key size must be exactly 32 bytes"));
-    }
-    if iv.len() != 32 {
-        return Err(PyValueError::new_err("IV size must be exactly 32 bytes"));
-    }
+    ensure_block_aligned(data)?;
+    let key_arr = copy_array::<32>(key, "Key")?;
+    let mut iv_arr = copy_array::<32>(iv, "IV")?;
 
-    let key_arr: &[u8; 32] = key.try_into().unwrap();
-    let mut iv_arr: [u8; 32] = iv.try_into().unwrap();
-
-    execute_zerocopy(py, data, move |dest| {
-        tgrcrypto_core::ige256_decrypt_into(data, key_arr, &mut iv_arr, dest);
-    })
+    let (bytes, _) = execute_zerocopy(py, data.len(), move |dest| {
+        tgrcrypto_core::ige256_decrypt_into(data, &key_arr, &mut iv_arr, dest);
+    })?;
+    Ok(bytes)
 }
 
-/// AES-256-CTR encryption.
+/// Encrypt bytes with AES-256-CTR.
+///
+/// Args:
+///     data: Plaintext bytes of any length.
+///     key: AES-256 key, exactly 32 bytes.
+///     iv: Counter block, exactly 16 bytes.
+///     state: Residual CTR byte offset encoded as a one-byte `bytes` object.
+///
+/// Returns:
+///     The encrypted ciphertext as `bytes`.
+///
+/// Raises:
+///     ValueError: If `key`, `iv`, or `state` are invalid.
+///     OverflowError: If the requested output would exceed Python's `bytes` size limit.
+///     RuntimeError: If an unexpected internal error occurs.
 #[pyfunction]
 #[pyo3(signature = (data, key, iv, state))]
 fn ctr256_encrypt<'py>(
@@ -120,34 +175,19 @@ fn ctr256_encrypt<'py>(
     iv: &[u8],
     state: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
-    if data.is_empty() {
-        return Err(PyValueError::new_err("Data must not be empty"));
-    }
-    if key.len() != 32 {
-        return Err(PyValueError::new_err("Key size must be exactly 32 bytes"));
-    }
-    if iv.len() != 16 {
-        return Err(PyValueError::new_err("IV size must be exactly 16 bytes"));
-    }
-    if state.len() != 1 {
-        return Err(PyValueError::new_err("State size must be exactly 1 byte"));
-    }
-    if state[0] > 15 {
-        return Err(PyValueError::new_err(
-            "State value must be in the range [0, 15]",
-        ));
-    }
+    let key_arr = copy_array::<32>(key, "Key")?;
+    let mut iv_arr = copy_array::<16>(iv, "IV")?;
+    let mut state_val = validate_ctr_state(state)?;
 
-    let key_arr: &[u8; 32] = key.try_into().unwrap();
-    let mut iv_arr: [u8; 16] = iv.try_into().unwrap();
-    let mut state_val = state[0];
-
-    execute_zerocopy(py, data, move |dest| {
-        tgrcrypto_core::ctr256_encrypt_into(data, key_arr, &mut iv_arr, &mut state_val, dest);
-    })
+    let (bytes, _) = execute_zerocopy(py, data.len(), move |dest| {
+        tgrcrypto_core::ctr256_encrypt_into(data, &key_arr, &mut iv_arr, &mut state_val, dest);
+    })?;
+    Ok(bytes)
 }
 
-/// AES-256-CTR decryption (symmetric with encrypt).
+/// Decrypt bytes with AES-256-CTR.
+///
+/// CTR is symmetric, so decryption delegates to `ctr256_encrypt`.
 #[pyfunction]
 #[pyo3(signature = (data, key, iv, state))]
 fn ctr256_decrypt<'py>(
@@ -160,7 +200,20 @@ fn ctr256_decrypt<'py>(
     ctr256_encrypt(py, data, key, iv, state)
 }
 
-/// AES-256-CBC encryption.
+/// Encrypt bytes with AES-256-CBC.
+///
+/// Args:
+///     data: Plaintext bytes. Length must be a multiple of 16 bytes.
+///     key: AES-256 key, exactly 32 bytes.
+///     iv: Initial vector, exactly 16 bytes.
+///
+/// Returns:
+///     The encrypted ciphertext as `bytes`.
+///
+/// Raises:
+///     ValueError: If `data`, `key`, or `iv` have invalid lengths.
+///     OverflowError: If the requested output would exceed Python's `bytes` size limit.
+///     RuntimeError: If an unexpected internal error occurs.
 #[pyfunction]
 #[pyo3(signature = (data, key, iv))]
 fn cbc256_encrypt<'py>(
@@ -169,30 +222,30 @@ fn cbc256_encrypt<'py>(
     key: &[u8],
     iv: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
-    if data.is_empty() {
-        return Err(PyValueError::new_err("Data must not be empty"));
-    }
-    if !data.len().is_multiple_of(16) {
-        return Err(PyValueError::new_err(
-            "Data size must match a multiple of 16 bytes",
-        ));
-    }
-    if key.len() != 32 {
-        return Err(PyValueError::new_err("Key size must be exactly 32 bytes"));
-    }
-    if iv.len() != 16 {
-        return Err(PyValueError::new_err("IV size must be exactly 16 bytes"));
-    }
+    ensure_block_aligned(data)?;
+    let key_arr = copy_array::<32>(key, "Key")?;
+    let mut iv_arr = copy_array::<16>(iv, "IV")?;
 
-    let key_arr: &[u8; 32] = key.try_into().unwrap();
-    let mut iv_arr: [u8; 16] = iv.try_into().unwrap();
-
-    execute_zerocopy(py, data, move |dest| {
-        tgrcrypto_core::cbc256_encrypt_into(data, key_arr, &mut iv_arr, dest);
-    })
+    let (bytes, _) = execute_zerocopy(py, data.len(), move |dest| {
+        tgrcrypto_core::cbc256_encrypt_into(data, &key_arr, &mut iv_arr, dest);
+    })?;
+    Ok(bytes)
 }
 
-/// AES-256-CBC decryption.
+/// Decrypt bytes with AES-256-CBC.
+///
+/// Args:
+///     data: Ciphertext bytes. Length must be a multiple of 16 bytes.
+///     key: AES-256 key, exactly 32 bytes.
+///     iv: Initial vector, exactly 16 bytes.
+///
+/// Returns:
+///     The decrypted plaintext as `bytes`.
+///
+/// Raises:
+///     ValueError: If `data`, `key`, or `iv` have invalid lengths.
+///     OverflowError: If the requested output would exceed Python's `bytes` size limit.
+///     RuntimeError: If an unexpected internal error occurs.
 #[pyfunction]
 #[pyo3(signature = (data, key, iv))]
 fn cbc256_decrypt<'py>(
@@ -201,31 +254,22 @@ fn cbc256_decrypt<'py>(
     key: &[u8],
     iv: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
-    if data.is_empty() {
-        return Err(PyValueError::new_err("Data must not be empty"));
-    }
-    if !data.len().is_multiple_of(16) {
-        return Err(PyValueError::new_err(
-            "Data size must match a multiple of 16 bytes",
-        ));
-    }
-    if key.len() != 32 {
-        return Err(PyValueError::new_err("Key size must be exactly 32 bytes"));
-    }
-    if iv.len() != 16 {
-        return Err(PyValueError::new_err("IV size must be exactly 16 bytes"));
-    }
+    ensure_block_aligned(data)?;
+    let key_arr = copy_array::<32>(key, "Key")?;
+    let mut iv_arr = copy_array::<16>(iv, "IV")?;
 
-    let key_arr: &[u8; 32] = key.try_into().unwrap();
-    let mut iv_arr: [u8; 16] = iv.try_into().unwrap();
-
-    execute_zerocopy(py, data, move |dest| {
-        tgrcrypto_core::cbc256_decrypt_into(data, key_arr, &mut iv_arr, dest);
-    })
+    let (bytes, _) = execute_zerocopy(py, data.len(), move |dest| {
+        tgrcrypto_core::cbc256_decrypt_into(data, &key_arr, &mut iv_arr, dest);
+    })?;
+    Ok(bytes)
 }
 
 /// Stateful AES-256-CTR stream cipher.
-#[pyclass]
+///
+/// The object preserves the CTR counter and residual byte offset between
+/// `update()` calls, allowing chunked encryption and decryption of a single
+/// logical byte stream.
+#[pyclass(module = "tgcrypto")]
 struct Ctr256 {
     key: [u8; 32],
     iv: [u8; 16],
@@ -234,14 +278,18 @@ struct Ctr256 {
 
 #[pymethods]
 impl Ctr256 {
+    /// Create a new AES-256-CTR stream cipher.
+    ///
+    /// Args:
+    ///     key: AES-256 key, exactly 32 bytes.
+    ///     iv: Initial counter block, exactly 16 bytes.
+    ///
+    /// Raises:
+    ///     ValueError: If `key` or `iv` have invalid lengths.
     #[new]
     fn new(key: &[u8], iv: &[u8]) -> PyResult<Self> {
-        let key_arr: [u8; 32] = key
-            .try_into()
-            .map_err(|_| PyValueError::new_err("Key must be 32 bytes"))?;
-        let iv_arr: [u8; 16] = iv
-            .try_into()
-            .map_err(|_| PyValueError::new_err("IV must be 16 bytes"))?;
+        let key_arr = copy_array::<32>(key, "Key")?;
+        let iv_arr = copy_array::<16>(iv, "IV")?;
         Ok(Ctr256 {
             key: key_arr,
             iv: iv_arr,
@@ -249,22 +297,39 @@ impl Ctr256 {
         })
     }
 
+    /// Encrypt or decrypt the next chunk of a CTR stream.
+    ///
+    /// Args:
+    ///     data: The next plaintext or ciphertext chunk.
+    ///
+    /// Returns:
+    ///     The processed chunk as `bytes`.
+    ///
+    /// Notes:
+    ///     AES-CTR is symmetric, so the same method is used for encryption
+    ///     and decryption.
     fn update<'py>(&mut self, py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
         let key_arr = self.key;
         let mut iv_arr = self.iv;
         let mut state_val = self.state;
 
-        let res = execute_zerocopy(py, data, move |dest| {
+        let (res, (next_iv, next_state)) = execute_zerocopy(py, data.len(), move |dest| {
             tgrcrypto_core::ctr256_encrypt_into(data, &key_arr, &mut iv_arr, &mut state_val, dest);
+            (iv_arr, state_val)
         })?;
 
-        self.iv = iv_arr;
-        self.state = state_val;
+        self.iv = next_iv;
+        self.state = next_state;
         Ok(res)
     }
 }
 
-#[pyclass]
+/// Stateful AES-256-IGE stream cipher.
+///
+/// The object preserves the evolving IGE chaining state between `encrypt()`
+/// or `decrypt()` calls, allowing incremental processing of a single logical
+/// block-aligned stream.
+#[pyclass(module = "tgcrypto")]
 struct Ige256 {
     key: [u8; 32],
     iv: [u8; 32],
@@ -272,51 +337,69 @@ struct Ige256 {
 
 #[pymethods]
 impl Ige256 {
+    /// Create a new AES-256-IGE stream cipher.
+    ///
+    /// Args:
+    ///     key: AES-256 key, exactly 32 bytes.
+    ///     iv: Initial vector, exactly 32 bytes.
+    ///
+    /// Raises:
+    ///     ValueError: If `key` or `iv` have invalid lengths.
     #[new]
     fn new(key: &[u8], iv: &[u8]) -> PyResult<Self> {
-        let key_arr: [u8; 32] = key
-            .try_into()
-            .map_err(|_| PyValueError::new_err("Key must be 32 bytes"))?;
-        let iv_arr: [u8; 32] = iv
-            .try_into()
-            .map_err(|_| PyValueError::new_err("IV must be 32 bytes"))?;
+        let key_arr = copy_array::<32>(key, "Key")?;
+        let iv_arr = copy_array::<32>(iv, "IV")?;
         Ok(Ige256 {
             key: key_arr,
             iv: iv_arr,
         })
     }
 
+    /// Encrypt the next block-aligned chunk with AES-256-IGE.
+    ///
+    /// Args:
+    ///     data: Plaintext bytes. Length must be a multiple of 16 bytes.
+    ///
+    /// Returns:
+    ///     The encrypted ciphertext chunk as `bytes`.
+    ///
+    /// Raises:
+    ///     ValueError: If `data` is not block-aligned.
     fn encrypt<'py>(&mut self, py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
-        if !data.len().is_multiple_of(16) {
-            return Err(PyValueError::new_err(
-                "Data size must match a multiple of 16 bytes",
-            ));
-        }
+        ensure_block_aligned(data)?;
         let key_arr = self.key;
         let mut iv_arr = self.iv;
 
-        let res = execute_zerocopy(py, data, move |dest| {
+        let (res, next_iv) = execute_zerocopy(py, data.len(), move |dest| {
             tgrcrypto_core::ige256_encrypt_into(data, &key_arr, &mut iv_arr, dest);
+            iv_arr
         })?;
 
-        self.iv = iv_arr;
+        self.iv = next_iv;
         Ok(res)
     }
 
+    /// Decrypt the next block-aligned chunk with AES-256-IGE.
+    ///
+    /// Args:
+    ///     data: Ciphertext bytes. Length must be a multiple of 16 bytes.
+    ///
+    /// Returns:
+    ///     The decrypted plaintext chunk as `bytes`.
+    ///
+    /// Raises:
+    ///     ValueError: If `data` is not block-aligned.
     fn decrypt<'py>(&mut self, py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
-        if !data.len().is_multiple_of(16) {
-            return Err(PyValueError::new_err(
-                "Data size must match a multiple of 16 bytes",
-            ));
-        }
+        ensure_block_aligned(data)?;
         let key_arr = self.key;
         let mut iv_arr = self.iv;
 
-        let res = execute_zerocopy(py, data, move |dest| {
+        let (res, next_iv) = execute_zerocopy(py, data.len(), move |dest| {
             tgrcrypto_core::ige256_decrypt_into(data, &key_arr, &mut iv_arr, dest);
+            iv_arr
         })?;
 
-        self.iv = iv_arr;
+        self.iv = next_iv;
         Ok(res)
     }
 }

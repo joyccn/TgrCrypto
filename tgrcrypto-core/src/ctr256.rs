@@ -207,3 +207,58 @@ pub fn ctr256_encrypt(data: &[u8], key: &[u8; 32], iv: &mut [u8; 16], state: &mu
 pub fn ctr256_decrypt(data: &[u8], key: &[u8; 32], iv: &mut [u8; 16], state: &mut u8) -> Vec<u8> {
     ctr256_encrypt(data, key, iv, state)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ctr256_roundtrip() {
+        let key = [0x42u8; 32];
+        let iv = [0x24u8; 16];
+        let data: Vec<u8> = (0..97).map(|i| (i & 0xff) as u8).collect();
+
+        let mut enc_iv = iv;
+        let mut enc_state = 0u8;
+        let encrypted = ctr256_encrypt(&data, &key, &mut enc_iv, &mut enc_state);
+
+        let mut dec_iv = iv;
+        let mut dec_state = 0u8;
+        let decrypted = ctr256_decrypt(&encrypted, &key, &mut dec_iv, &mut dec_state);
+
+        assert_eq!(data, decrypted);
+    }
+
+    #[test]
+    fn test_ctr256_chunked_matches_one_shot() {
+        let key = [0x42u8; 32];
+        let iv = [0x24u8; 16];
+        let data: Vec<u8> = (0..97).map(|i| (i & 0xff) as u8).collect();
+
+        let mut one_shot_iv = iv;
+        let mut one_shot_state = 0u8;
+        let one_shot = ctr256_encrypt(&data, &key, &mut one_shot_iv, &mut one_shot_state);
+
+        let mut chunked_iv = iv;
+        let mut chunked_state = 0u8;
+        let mut chunked = Vec::with_capacity(data.len());
+
+        for chunk in [17usize, 23, 7, 50] {
+            let start = chunked.len();
+            let end = core::cmp::min(start + chunk, data.len());
+            chunked.extend(ctr256_encrypt(
+                &data[start..end],
+                &key,
+                &mut chunked_iv,
+                &mut chunked_state,
+            ));
+            if end == data.len() {
+                break;
+            }
+        }
+
+        assert_eq!(one_shot, chunked);
+        assert_eq!(one_shot_iv, chunked_iv);
+        assert_eq!(one_shot_state, chunked_state);
+    }
+}

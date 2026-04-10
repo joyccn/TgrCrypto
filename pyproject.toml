@@ -4,10 +4,10 @@ build-backend = "maturin"
 
 [project]
 name = "TgrCrypto"
-version = "1.0.0b1"
+version = "1.0.0b2"
 description = "High-Performance Cryptography Extension Library for Kurigram"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.9,<3.15"
 license = "LGPL-3.0-or-later"
 keywords = ["kurigram", "telegram", "crypto", "cryptography", "encryption", "mtproto", "aes", "rust"]
 classifiers = [
@@ -17,6 +17,7 @@ classifiers = [
     "Operating System :: OS Independent",
     "Programming Language :: Rust",
     "Programming Language :: Python",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
