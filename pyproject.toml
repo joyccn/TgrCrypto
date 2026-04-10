@@ -51,3 +51,7 @@ Source = "https://github.com/joyccn/TgrCrypto"
 manifest-path = "tgrcrypto-python/Cargo.toml"
 module-name = "tgcrypto"
 features = ["pyo3/extension-module", "pyo3/generate-import-lib"]
+include = [
+    { path = "COPYING", format = "sdist" },
+    { path = "COPYING.lesser", format = "sdist" },
+]
