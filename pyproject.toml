@@ -9,7 +9,16 @@ description = "High-Performance Cryptography Extension Library for Kurigram"
 readme = "README.md"
 requires-python = ">=3.9,<3.15"
 license = "LGPL-3.0-or-later"
-keywords = ["kurigram", "telegram", "crypto", "cryptography", "encryption", "mtproto", "aes", "rust"]
+keywords = [
+    "kurigram",
+    "telegram",
+    "crypto",
+    "cryptography",
+    "encryption",
+    "mtproto",
+    "aes",
+    "rust",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -25,7 +34,6 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: Implementation :: PyPy",
     "Topic :: Security",
     "Topic :: Security :: Cryptography",
     "Topic :: Internet",
@@ -36,7 +44,8 @@ classifiers = [
 ]
 
 [project.urls]
-Source = "https://github.com/joyccn/tgrcrypto"
+Homepage = "https://github.com/joyccn/TgrCrypto"
+Source = "https://github.com/joyccn/TgrCrypto"
 
 [tool.maturin]
 manifest-path = "tgrcrypto-python/Cargo.toml"
