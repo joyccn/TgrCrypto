@@ -3,12 +3,15 @@
 > Rust-powered, AES-NI accelerated drop-in replacement for TgCrypto
 
 [![CI](https://github.com/joyccn/tgrcrypto/actions/workflows/ci.yml/badge.svg)](https://github.com/joyccn/tgrcrypto/actions/workflows/ci.yml)
-![Status](https://img.shields.io/badge/status-beta-orange)
 ![License](https://img.shields.io/badge/license-LGPL--3.0-blue)
 ![Python](https://img.shields.io/badge/python-3.9--3.14-brightgreen)
 
 > [!NOTE]
-> This project is currently in **beta**. The API is stable and compatible with TgCrypto, but it has not undergone a formal security audit.
+> The cryptographic algorithms implemented in this library — AES-256-IGE, AES-256-CTR,
+> and AES-256-CBC — are provided for educational and experimental purposes.
+> While the implementation follows NIST FIPS 197 specifications and has been validated
+> against official test vectors, it has not undergone a formal third-party security audit.
+> Use in production systems requiring certified cryptographic modules is at your own discretion.
 
 ## Requirements
 
@@ -17,13 +20,19 @@
 
 ## Installation
 
-```bash
-uv sync --python 3.14
-uv run python -c "import tgcrypto; print('TgrCrypto loaded successfully')"
+> [!TIP]
+> [uv](https://github.com/astral-sh/uv) is the recommended package manager for TgrCrypto.
+> It provides significantly faster installs and reliable dependency resolution.
 
-# Or build a distributable wheel
-uv build --wheel
-uv run python -m pip install dist/tgrcrypto-*.whl
+```bash
+# Recommended
+uv add TgrCrypto
+
+# Alternative
+uv pip install TgrCrypto
+
+# pip
+pip install TgrCrypto
 ```
 
 ## Usage
