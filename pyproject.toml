@@ -1,0 +1,43 @@
+[build-system]
+requires = ["maturin>=1.13.1"]
+build-backend = "maturin"
+
+[project]
+name = "TgrCrypto"
+version = "1.0.0b1"
+description = "High-Performance Cryptography Extension Library for Kurigram"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "LGPL-3.0-or-later"
+keywords = ["kurigram", "telegram", "crypto", "cryptography", "encryption", "mtproto", "aes", "rust"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Lesser General Public License v3 or later (LGPLv3+)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Rust",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+    "Topic :: Security",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Internet",
+    "Topic :: Communications",
+    "Topic :: Communications :: Chat",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Source = "https://github.com/joyccn/tgrcrypto"
+
+[tool.maturin]
+manifest-path = "tgrcrypto-python/Cargo.toml"
+module-name = "tgcrypto"
+features = ["pyo3/extension-module", "pyo3/generate-import-lib"]

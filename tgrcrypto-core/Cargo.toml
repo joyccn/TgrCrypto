@@ -1,0 +1,21 @@
+[package]
+name = "tgrcrypto-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "High-performance Telegram cryptography library in Rust"
+
+[features]
+default = ["aesni"]
+aesni = []
+neon = []
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "benchmark"
+harness = false
+
+[dependencies]
+rayon = "1.11.0"
