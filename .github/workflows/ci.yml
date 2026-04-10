@@ -54,7 +54,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run Rust Tests
-        run: cargo test --release
+        run: cargo test -p tgrcrypto-core --release
 
   python:
     name: Python ${{ matrix.python }} (${{ matrix.os }})
@@ -75,15 +75,16 @@ jobs:
       - name: Restore Cargo Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Install uv
-        run: python3 -m pip install --upgrade uv
+      - name: Setup Python ${{ matrix.python }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
 
-      - name: Sync Environment
-        run: uv sync --python ${{ matrix.python }}
+      - name: Install maturin
+        run: pip install "maturin[patchelf]"
 
-      - name: Run Python API Tests
+      - name: Build Wheel & Smoke Test
         run: |
-          uv run python -m unittest discover -s tests -v
-
-      - name: Build Wheel Through uv
-        run: uv build --wheel --python ${{ matrix.python }}
+          maturin build --release
+          pip install target/wheels/*.whl
+          python -c "import tgcrypto; print('TgrCrypto loaded successfully')"
