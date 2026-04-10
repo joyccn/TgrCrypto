@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [master]
 
+permissions:
+  contents: read
+  actions: write
+
 env:
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
