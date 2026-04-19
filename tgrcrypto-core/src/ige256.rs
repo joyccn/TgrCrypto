@@ -21,12 +21,7 @@ pub fn ige256_encrypt_into(data: &[u8], key: &[u8; 32], iv: &mut [u8; 32], dest:
 }
 
 /// Encrypt data in AES-256-IGE mode using a pre-expanded key.
-pub fn ige256_encrypt_into_ek(
-    data: &[u8],
-    ek: &ExpandedKey,
-    iv: &mut [u8; 32],
-    dest: &mut [u8],
-) {
+pub fn ige256_encrypt_into_ek(data: &[u8], ek: &ExpandedKey, iv: &mut [u8; 32], dest: &mut [u8]) {
     let len = data.len();
     assert_eq!(len, dest.len(), "Source and destination lengths must match");
     if len == 0 {
@@ -77,12 +72,7 @@ pub fn ige256_decrypt_into(data: &[u8], key: &[u8; 32], iv: &mut [u8; 32], dest:
 }
 
 /// Decrypt data in AES-256-IGE mode using a pre-expanded key.
-pub fn ige256_decrypt_into_ek(
-    data: &[u8],
-    dk: &ExpandedKey,
-    iv: &mut [u8; 32],
-    dest: &mut [u8],
-) {
+pub fn ige256_decrypt_into_ek(data: &[u8], dk: &ExpandedKey, iv: &mut [u8; 32], dest: &mut [u8]) {
     let len = data.len();
     assert_eq!(len, dest.len(), "Source and destination lengths must match");
     if len == 0 {

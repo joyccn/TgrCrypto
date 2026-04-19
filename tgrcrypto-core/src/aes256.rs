@@ -140,7 +140,10 @@ mod aesni {
     /// Used only during key schedule preparation (not on the encryption/decryption
     /// hot path). The per-block path uses `rkb()` with pre-computed bytes instead.
     #[inline(always)]
-    unsafe fn load_round_key_from_words(expanded_key: &[u32; EXPANDED_KEY_SIZE], round: usize) -> __m128i {
+    unsafe fn load_round_key_from_words(
+        expanded_key: &[u32; EXPANDED_KEY_SIZE],
+        round: usize,
+    ) -> __m128i {
         let base = round * 4;
         let mut bytes = [0u8; 16];
         for i in 0..4 {
@@ -157,11 +160,7 @@ mod aesni {
     ///
     /// SAFETY: caller must ensure AES-NI is available.
     #[target_feature(enable = "aes", enable = "sse2")]
-    pub unsafe fn encrypt_block(
-        input: &[u8; 16],
-        output: &mut [u8; 16],
-        round_key_bytes: &[u8],
-    ) {
+    pub unsafe fn encrypt_block(input: &[u8; 16], output: &mut [u8; 16], round_key_bytes: &[u8]) {
         let mut state = _mm_loadu_si128(input.as_ptr() as *const __m128i);
         state = _mm_xor_si128(state, rkb(round_key_bytes, 0));
 
@@ -227,11 +226,7 @@ mod aesni {
     ///
     /// SAFETY: caller must ensure AES-NI is available.
     #[target_feature(enable = "aes", enable = "sse2")]
-    pub unsafe fn decrypt_block(
-        input: &[u8; 16],
-        output: &mut [u8; 16],
-        round_key_bytes: &[u8],
-    ) {
+    pub unsafe fn decrypt_block(input: &[u8; 16], output: &mut [u8; 16], round_key_bytes: &[u8]) {
         let mut state = _mm_loadu_si128(input.as_ptr() as *const __m128i);
         state = _mm_xor_si128(state, rkb(round_key_bytes, 0));
 
@@ -951,11 +946,7 @@ pub fn decrypt_block_soft(input: &[u8; 16], output: &mut [u8; 16], key: &[u32; E
 
 /// Encrypt a single 16-byte block. Dispatches to AES-NI or software.
 #[inline]
-pub fn encrypt_block(
-    input: &[u8; 16],
-    output: &mut [u8; 16],
-    ek: &ExpandedKey,
-) {
+pub fn encrypt_block(input: &[u8; 16], output: &mut [u8; 16], ek: &ExpandedKey) {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         if use_aesni() {
@@ -970,11 +961,7 @@ pub fn encrypt_block(
 
 /// Encrypt 4 blocks (64 bytes) simultaneously. Dispatches to AES-NI or software loop.
 #[inline]
-pub fn encrypt_block_x4(
-    input: &[u8; 64],
-    output: &mut [u8; 64],
-    ek: &ExpandedKey,
-) {
+pub fn encrypt_block_x4(input: &[u8; 64], output: &mut [u8; 64], ek: &ExpandedKey) {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         if use_aesni() {
@@ -1008,11 +995,7 @@ pub fn encrypt_block_x4(
 
 /// Decrypt a single 16-byte block. Dispatches to AES-NI or software.
 #[inline]
-pub fn decrypt_block(
-    input: &[u8; 16],
-    output: &mut [u8; 16],
-    ek: &ExpandedKey,
-) {
+pub fn decrypt_block(input: &[u8; 16], output: &mut [u8; 16], ek: &ExpandedKey) {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         if use_aesni() {
@@ -1027,11 +1010,7 @@ pub fn decrypt_block(
 
 /// Decrypt 4 blocks (64 bytes) simultaneously. Dispatches to AES-NI or software loop.
 #[inline]
-pub fn decrypt_block_x4(
-    input: &[u8; 64],
-    output: &mut [u8; 64],
-    ek: &ExpandedKey,
-) {
+pub fn decrypt_block_x4(input: &[u8; 64], output: &mut [u8; 64], ek: &ExpandedKey) {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         if use_aesni() {

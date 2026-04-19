@@ -121,7 +121,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: --release --out dist --interpreter python
+          args: --release --out dist --interpreter python${{ matrix.python }}
           sccache: "true"
 
       - name: Upload Wheel as Artifact
@@ -157,7 +157,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
           command: build
-          args: --release --out dist --interpreter python
+          args: --release --out dist --interpreter python${{ matrix.python }}
           sccache: "true"
           manylinux: auto
 
