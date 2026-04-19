@@ -22,22 +22,18 @@ fn increment_counter(iv: &mut [u8; 16]) {
     }
 }
 
-/// Add a 64-bit value to a 16-byte big-endian counter.
+/// Add a 64-bit block offset to a 16-byte big-endian counter.
+///
+/// Treats the lower 8 bytes of the counter as a big-endian u64, adds the
+/// offset, and propagates any carry into the upper 8 bytes.
 #[inline]
 fn add_counter(iv: &[u8; 16], offset: u64) -> [u8; 16] {
     let mut out = *iv;
-    let mut carry = offset;
+    let mut carry = offset as u128;
     let mut k = AES_BLOCK_SIZE;
     while k > 0 && carry > 0 {
         k -= 1;
-        let sum = (out[k] as u64) + (carry & 0xFF);
-        out[k] = sum as u8;
-        carry = (carry >> 8) + (sum >> 8);
-    }
-    // If carry is still > 0, it means the 64-bit addition overflowed into the top 8 bytes.
-    while k > 0 && carry > 0 {
-        k -= 1;
-        let sum = (out[k] as u64) + (carry & 0xFF);
+        let sum = out[k] as u128 + (carry & 0xFF);
         out[k] = sum as u8;
         carry = (carry >> 8) + (sum >> 8);
     }
@@ -52,6 +48,18 @@ pub fn ctr256_encrypt_into(
     state: &mut u8,
     dest: &mut [u8],
 ) {
+    let ek = ExpandedKey::new_encrypt(key);
+    ctr256_encrypt_into_ek(data, &ek, iv, state, dest);
+}
+
+/// Encrypt/decrypt data in AES-256-CTR using a pre-expanded key.
+pub fn ctr256_encrypt_into_ek(
+    data: &[u8],
+    ek: &ExpandedKey,
+    iv: &mut [u8; 16],
+    state: &mut u8,
+    dest: &mut [u8],
+) {
     let len = data.len();
     assert_eq!(len, dest.len(), "Source and destination lengths must match");
 
@@ -59,17 +67,15 @@ pub fn ctr256_encrypt_into(
         return;
     }
 
-    let ek = ExpandedKey::new_encrypt(key);
-
     if len < PARALLEL_THRESHOLD {
-        ctr256_encrypt_internal(data, dest, &ek, iv, state);
+        ctr256_encrypt_internal(data, dest, ek, iv, state);
         return;
     }
 
     let mut processed = 0;
     if *state != 0 {
         let mut chunk = [0u8; 16];
-        aes256::encrypt_block(iv, &mut chunk, &ek.words);
+        aes256::encrypt_block(iv, &mut chunk, ek);
         let rem = AES_BLOCK_SIZE - (*state as usize);
         let advance = core::cmp::min(len, rem);
 
@@ -108,7 +114,7 @@ pub fn ctr256_encrypt_into(
                 ctr256_encrypt_internal(
                     chunk_data,
                     chunk_dest,
-                    &ek,
+                    ek,
                     &mut local_iv,
                     &mut local_state,
                 );
@@ -122,7 +128,7 @@ pub fn ctr256_encrypt_into(
     if processed < len {
         let tail_data = &data[processed..];
         let tail_dest = &mut dest[processed..];
-        ctr256_encrypt_internal(tail_data, tail_dest, &ek, iv, state);
+        ctr256_encrypt_internal(tail_data, tail_dest, ek, iv, state);
     }
 }
 
@@ -139,7 +145,7 @@ fn ctr256_encrypt_internal(
 
     if *state > 0 {
         let mut chunk = [0u8; 16];
-        aes256::encrypt_block(iv, &mut chunk, &ek.words);
+        aes256::encrypt_block(iv, &mut chunk, ek);
 
         while i < len && *state > 0 {
             dest[i] = data[i] ^ chunk[*state as usize];
@@ -166,7 +172,7 @@ fn ctr256_encrypt_internal(
         increment_counter(iv);
 
         let mut keystream = [0u8; 64];
-        aes256::encrypt_block_x4(&ivs, &mut keystream, &ek.words);
+        aes256::encrypt_block_x4(&ivs, &mut keystream, ek);
 
         for j in 0..64 {
             dest[i + j] = data[i + j] ^ keystream[j];
@@ -176,7 +182,7 @@ fn ctr256_encrypt_internal(
 
     while i + 16 <= len {
         let mut keystream = [0u8; 16];
-        aes256::encrypt_block(iv, &mut keystream, &ek.words);
+        aes256::encrypt_block(iv, &mut keystream, ek);
         increment_counter(iv);
 
         for j in 0..16 {
@@ -187,7 +193,7 @@ fn ctr256_encrypt_internal(
 
     if i < len {
         let mut keystream = [0u8; 16];
-        aes256::encrypt_block(iv, &mut keystream, &ek.words);
+        aes256::encrypt_block(iv, &mut keystream, ek);
 
         while i < len {
             dest[i] = data[i] ^ keystream[*state as usize];
@@ -260,5 +266,42 @@ mod tests {
         assert_eq!(one_shot, chunked);
         assert_eq!(one_shot_iv, chunked_iv);
         assert_eq!(one_shot_state, chunked_state);
+    }
+
+    #[test]
+    fn test_ctr256_single_byte() {
+        let key = [0x42u8; 32];
+        let iv = [0x24u8; 16];
+        let data = vec![0xABu8; 1];
+
+        let mut enc_iv = iv;
+        let mut enc_state = 0u8;
+        let encrypted = ctr256_encrypt(&data, &key, &mut enc_iv, &mut enc_state);
+        assert_eq!(enc_state, 1);
+
+        let mut dec_iv = iv;
+        let mut dec_state = 0u8;
+        let decrypted = ctr256_decrypt(&encrypted, &key, &mut dec_iv, &mut dec_state);
+        assert_eq!(data, decrypted);
+    }
+
+    #[test]
+    fn test_add_counter_basic() {
+        let iv = [0u8; 16];
+        let result = add_counter(&iv, 1);
+        assert_eq!(result[15], 1);
+
+        let result = add_counter(&iv, 256);
+        assert_eq!(result[14], 1);
+        assert_eq!(result[15], 0);
+    }
+
+    #[test]
+    fn test_add_counter_carry() {
+        let mut iv = [0u8; 16];
+        iv[15] = 0xFF;
+        let result = add_counter(&iv, 1);
+        assert_eq!(result[14], 1);
+        assert_eq!(result[15], 0);
     }
 }

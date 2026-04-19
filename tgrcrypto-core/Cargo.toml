@@ -8,7 +8,9 @@ description = "High-performance Telegram cryptography library in Rust"
 
 [features]
 default = ["aesni"]
+## Enable AES-NI hardware acceleration on x86/x86_64 (runtime detected).
 aesni = []
+## Reserved for future ARM NEON acceleration (not yet implemented).
 neon = []
 
 [dev-dependencies]

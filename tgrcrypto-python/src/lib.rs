@@ -268,10 +268,11 @@ fn cbc256_decrypt<'py>(
 ///
 /// The object preserves the CTR counter and residual byte offset between
 /// `update()` calls, allowing chunked encryption and decryption of a single
-/// logical byte stream.
+/// logical byte stream. The AES key schedule is expanded once at construction
+/// and reused for all subsequent operations.
 #[pyclass(module = "tgcrypto")]
 struct Ctr256 {
-    key: [u8; 32],
+    ek: tgrcrypto_core::ExpandedKey,
     iv: [u8; 16],
     state: u8,
 }
@@ -291,7 +292,7 @@ impl Ctr256 {
         let key_arr = copy_array::<32>(key, "Key")?;
         let iv_arr = copy_array::<16>(iv, "IV")?;
         Ok(Ctr256 {
-            key: key_arr,
+            ek: tgrcrypto_core::ExpandedKey::new_encrypt(&key_arr),
             iv: iv_arr,
             state: 0,
         })
@@ -309,12 +310,12 @@ impl Ctr256 {
     ///     AES-CTR is symmetric, so the same method is used for encryption
     ///     and decryption.
     fn update<'py>(&mut self, py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
-        let key_arr = self.key;
+        let ek = self.ek.clone();
         let mut iv_arr = self.iv;
         let mut state_val = self.state;
 
         let (res, (next_iv, next_state)) = execute_zerocopy(py, data.len(), move |dest| {
-            tgrcrypto_core::ctr256_encrypt_into(data, &key_arr, &mut iv_arr, &mut state_val, dest);
+            tgrcrypto_core::ctr256_encrypt_into_ek(data, &ek, &mut iv_arr, &mut state_val, dest);
             (iv_arr, state_val)
         })?;
 
@@ -328,10 +329,12 @@ impl Ctr256 {
 ///
 /// The object preserves the evolving IGE chaining state between `encrypt()`
 /// or `decrypt()` calls, allowing incremental processing of a single logical
-/// block-aligned stream.
+/// block-aligned stream. The AES key schedules are expanded once at construction
+/// and reused for all subsequent operations.
 #[pyclass(module = "tgcrypto")]
 struct Ige256 {
-    key: [u8; 32],
+    enc_key: tgrcrypto_core::ExpandedKey,
+    dec_key: tgrcrypto_core::ExpandedKey,
     iv: [u8; 32],
 }
 
@@ -350,7 +353,8 @@ impl Ige256 {
         let key_arr = copy_array::<32>(key, "Key")?;
         let iv_arr = copy_array::<32>(iv, "IV")?;
         Ok(Ige256 {
-            key: key_arr,
+            enc_key: tgrcrypto_core::ExpandedKey::new_encrypt(&key_arr),
+            dec_key: tgrcrypto_core::ExpandedKey::new_decrypt(&key_arr),
             iv: iv_arr,
         })
     }
@@ -367,11 +371,11 @@ impl Ige256 {
     ///     ValueError: If `data` is not block-aligned.
     fn encrypt<'py>(&mut self, py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
         ensure_block_aligned(data)?;
-        let key_arr = self.key;
+        let ek = self.enc_key.clone();
         let mut iv_arr = self.iv;
 
         let (res, next_iv) = execute_zerocopy(py, data.len(), move |dest| {
-            tgrcrypto_core::ige256_encrypt_into(data, &key_arr, &mut iv_arr, dest);
+            tgrcrypto_core::ige256_encrypt_into_ek(data, &ek, &mut iv_arr, dest);
             iv_arr
         })?;
 
@@ -391,11 +395,11 @@ impl Ige256 {
     ///     ValueError: If `data` is not block-aligned.
     fn decrypt<'py>(&mut self, py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
         ensure_block_aligned(data)?;
-        let key_arr = self.key;
+        let dk = self.dec_key.clone();
         let mut iv_arr = self.iv;
 
         let (res, next_iv) = execute_zerocopy(py, data.len(), move |dest| {
-            tgrcrypto_core::ige256_decrypt_into(data, &key_arr, &mut iv_arr, dest);
+            tgrcrypto_core::ige256_decrypt_into_ek(data, &dk, &mut iv_arr, dest);
             iv_arr
         })?;
 

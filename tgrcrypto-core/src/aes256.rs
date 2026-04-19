@@ -19,20 +19,40 @@ const NK: usize = 8;
 const NB: usize = 4;
 
 /// An expanded AES-256 key, aligned for SIMD access.
+///
+/// Contains both the u32 word representation (for the software T-table path)
+/// and a pre-computed byte representation (for zero-overhead AES-NI round key
+/// loads). Sensitive key material is zeroized on drop.
 #[repr(align(16))]
 #[derive(Clone)]
 pub struct ExpandedKey {
     pub words: [u32; EXPANDED_KEY_SIZE],
+    round_key_bytes: [u8; (NR + 1) * 16],
 }
 
 impl ExpandedKey {
+    /// Pre-compute the big-endian byte representation of all round keys.
+    ///
+    /// This eliminates the per-block byte-swap overhead on the AES-NI hot path
+    /// by converting the u32 word schedule into a flat byte array that can be
+    /// loaded directly with `_mm_loadu_si128`.
+    fn compute_round_key_bytes(&mut self) {
+        for i in 0..EXPANDED_KEY_SIZE {
+            let be = self.words[i].to_be_bytes();
+            let off = i * 4;
+            self.round_key_bytes[off..off + 4].copy_from_slice(&be);
+        }
+    }
+
     /// Create an encryption expanded key from the raw 32-byte key.
     #[inline]
     pub fn new_encrypt(key: &[u8; 32]) -> Self {
         let mut ek = ExpandedKey {
             words: [0u32; EXPANDED_KEY_SIZE],
+            round_key_bytes: [0u8; (NR + 1) * 16],
         };
         set_encryption_key(key, &mut ek.words);
+        ek.compute_round_key_bytes();
         ek
     }
 
@@ -41,9 +61,44 @@ impl ExpandedKey {
     pub fn new_decrypt(key: &[u8; 32]) -> Self {
         let mut ek = ExpandedKey {
             words: [0u32; EXPANDED_KEY_SIZE],
+            round_key_bytes: [0u8; (NR + 1) * 16],
         };
         set_decryption_key(key, &mut ek.words);
+        ek.compute_round_key_bytes();
         ek
+    }
+}
+
+impl Drop for ExpandedKey {
+    fn drop(&mut self) {
+        for w in self.words.iter_mut() {
+            unsafe { core::ptr::write_volatile(w, 0) };
+        }
+        for b in self.round_key_bytes.iter_mut() {
+            unsafe { core::ptr::write_volatile(b, 0) };
+        }
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Cached AES-NI availability check.
+///
+/// Performs the CPUID query once and caches the result in an atomic,
+/// eliminating per-block branch overhead.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[inline]
+fn use_aesni() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    // 0 = not yet checked, 1 = not available, 2 = available
+    static CACHED: AtomicU8 = AtomicU8::new(0);
+    match CACHED.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let avail = aesni::is_available();
+            CACHED.store(if avail { 2 } else { 1 }, Ordering::Relaxed);
+            avail
+        }
     }
 }
 
@@ -71,11 +126,21 @@ mod aesni {
         }
     }
 
-    /// Convert 4 big-endian u32 round key words into an __m128i.
-    /// The key schedule stores u32s in big-endian format, but AES-NI
-    /// needs them as a raw 16-byte sequence matching the AES spec.
+    /// Load a pre-computed round key directly from the byte representation.
+    ///
+    /// This is the hot-path loader: a single unaligned SIMD load with zero
+    /// byte-swap overhead.
     #[inline(always)]
-    unsafe fn load_round_key(expanded_key: &[u32; EXPANDED_KEY_SIZE], round: usize) -> __m128i {
+    unsafe fn rkb(round_key_bytes: &[u8], round: usize) -> __m128i {
+        _mm_loadu_si128(round_key_bytes.as_ptr().add(round * 16) as *const __m128i)
+    }
+
+    /// Convert 4 big-endian u32 round key words into an __m128i.
+    ///
+    /// Used only during key schedule preparation (not on the encryption/decryption
+    /// hot path). The per-block path uses `rkb()` with pre-computed bytes instead.
+    #[inline(always)]
+    unsafe fn load_round_key_from_words(expanded_key: &[u32; EXPANDED_KEY_SIZE], round: usize) -> __m128i {
         let base = round * 4;
         let mut bytes = [0u8; 16];
         for i in 0..4 {
@@ -95,26 +160,26 @@ mod aesni {
     pub unsafe fn encrypt_block(
         input: &[u8; 16],
         output: &mut [u8; 16],
-        expanded_key: &[u32; EXPANDED_KEY_SIZE],
+        round_key_bytes: &[u8],
     ) {
         let mut state = _mm_loadu_si128(input.as_ptr() as *const __m128i);
-        state = _mm_xor_si128(state, load_round_key(expanded_key, 0));
+        state = _mm_xor_si128(state, rkb(round_key_bytes, 0));
 
-        state = _mm_aesenc_si128(state, load_round_key(expanded_key, 1));
-        state = _mm_aesenc_si128(state, load_round_key(expanded_key, 2));
-        state = _mm_aesenc_si128(state, load_round_key(expanded_key, 3));
-        state = _mm_aesenc_si128(state, load_round_key(expanded_key, 4));
-        state = _mm_aesenc_si128(state, load_round_key(expanded_key, 5));
-        state = _mm_aesenc_si128(state, load_round_key(expanded_key, 6));
-        state = _mm_aesenc_si128(state, load_round_key(expanded_key, 7));
-        state = _mm_aesenc_si128(state, load_round_key(expanded_key, 8));
-        state = _mm_aesenc_si128(state, load_round_key(expanded_key, 9));
-        state = _mm_aesenc_si128(state, load_round_key(expanded_key, 10));
-        state = _mm_aesenc_si128(state, load_round_key(expanded_key, 11));
-        state = _mm_aesenc_si128(state, load_round_key(expanded_key, 12));
-        state = _mm_aesenc_si128(state, load_round_key(expanded_key, 13));
+        state = _mm_aesenc_si128(state, rkb(round_key_bytes, 1));
+        state = _mm_aesenc_si128(state, rkb(round_key_bytes, 2));
+        state = _mm_aesenc_si128(state, rkb(round_key_bytes, 3));
+        state = _mm_aesenc_si128(state, rkb(round_key_bytes, 4));
+        state = _mm_aesenc_si128(state, rkb(round_key_bytes, 5));
+        state = _mm_aesenc_si128(state, rkb(round_key_bytes, 6));
+        state = _mm_aesenc_si128(state, rkb(round_key_bytes, 7));
+        state = _mm_aesenc_si128(state, rkb(round_key_bytes, 8));
+        state = _mm_aesenc_si128(state, rkb(round_key_bytes, 9));
+        state = _mm_aesenc_si128(state, rkb(round_key_bytes, 10));
+        state = _mm_aesenc_si128(state, rkb(round_key_bytes, 11));
+        state = _mm_aesenc_si128(state, rkb(round_key_bytes, 12));
+        state = _mm_aesenc_si128(state, rkb(round_key_bytes, 13));
 
-        state = _mm_aesenclast_si128(state, load_round_key(expanded_key, 14));
+        state = _mm_aesenclast_si128(state, rkb(round_key_bytes, 14));
         _mm_storeu_si128(output.as_mut_ptr() as *mut __m128i, state);
     }
 
@@ -125,28 +190,28 @@ mod aesni {
     pub unsafe fn encrypt_block_x4(
         input: &[u8; 64],
         output: &mut [u8; 64],
-        expanded_key: &[u32; EXPANDED_KEY_SIZE],
+        round_key_bytes: &[u8],
     ) {
         let mut s0 = _mm_loadu_si128(input[0..16].as_ptr() as *const __m128i);
         let mut s1 = _mm_loadu_si128(input[16..32].as_ptr() as *const __m128i);
         let mut s2 = _mm_loadu_si128(input[32..48].as_ptr() as *const __m128i);
         let mut s3 = _mm_loadu_si128(input[48..64].as_ptr() as *const __m128i);
 
-        let mut rk = load_round_key(expanded_key, 0);
+        let mut rk = rkb(round_key_bytes, 0);
         s0 = _mm_xor_si128(s0, rk);
         s1 = _mm_xor_si128(s1, rk);
         s2 = _mm_xor_si128(s2, rk);
         s3 = _mm_xor_si128(s3, rk);
 
         for r in 1..=13 {
-            rk = load_round_key(expanded_key, r);
+            rk = rkb(round_key_bytes, r);
             s0 = _mm_aesenc_si128(s0, rk);
             s1 = _mm_aesenc_si128(s1, rk);
             s2 = _mm_aesenc_si128(s2, rk);
             s3 = _mm_aesenc_si128(s3, rk);
         }
 
-        rk = load_round_key(expanded_key, 14);
+        rk = rkb(round_key_bytes, 14);
         s0 = _mm_aesenclast_si128(s0, rk);
         s1 = _mm_aesenclast_si128(s1, rk);
         s2 = _mm_aesenclast_si128(s2, rk);
@@ -165,26 +230,26 @@ mod aesni {
     pub unsafe fn decrypt_block(
         input: &[u8; 16],
         output: &mut [u8; 16],
-        expanded_key: &[u32; EXPANDED_KEY_SIZE],
+        round_key_bytes: &[u8],
     ) {
         let mut state = _mm_loadu_si128(input.as_ptr() as *const __m128i);
-        state = _mm_xor_si128(state, load_round_key(expanded_key, 0));
+        state = _mm_xor_si128(state, rkb(round_key_bytes, 0));
 
-        state = _mm_aesdec_si128(state, load_round_key(expanded_key, 1));
-        state = _mm_aesdec_si128(state, load_round_key(expanded_key, 2));
-        state = _mm_aesdec_si128(state, load_round_key(expanded_key, 3));
-        state = _mm_aesdec_si128(state, load_round_key(expanded_key, 4));
-        state = _mm_aesdec_si128(state, load_round_key(expanded_key, 5));
-        state = _mm_aesdec_si128(state, load_round_key(expanded_key, 6));
-        state = _mm_aesdec_si128(state, load_round_key(expanded_key, 7));
-        state = _mm_aesdec_si128(state, load_round_key(expanded_key, 8));
-        state = _mm_aesdec_si128(state, load_round_key(expanded_key, 9));
-        state = _mm_aesdec_si128(state, load_round_key(expanded_key, 10));
-        state = _mm_aesdec_si128(state, load_round_key(expanded_key, 11));
-        state = _mm_aesdec_si128(state, load_round_key(expanded_key, 12));
-        state = _mm_aesdec_si128(state, load_round_key(expanded_key, 13));
+        state = _mm_aesdec_si128(state, rkb(round_key_bytes, 1));
+        state = _mm_aesdec_si128(state, rkb(round_key_bytes, 2));
+        state = _mm_aesdec_si128(state, rkb(round_key_bytes, 3));
+        state = _mm_aesdec_si128(state, rkb(round_key_bytes, 4));
+        state = _mm_aesdec_si128(state, rkb(round_key_bytes, 5));
+        state = _mm_aesdec_si128(state, rkb(round_key_bytes, 6));
+        state = _mm_aesdec_si128(state, rkb(round_key_bytes, 7));
+        state = _mm_aesdec_si128(state, rkb(round_key_bytes, 8));
+        state = _mm_aesdec_si128(state, rkb(round_key_bytes, 9));
+        state = _mm_aesdec_si128(state, rkb(round_key_bytes, 10));
+        state = _mm_aesdec_si128(state, rkb(round_key_bytes, 11));
+        state = _mm_aesdec_si128(state, rkb(round_key_bytes, 12));
+        state = _mm_aesdec_si128(state, rkb(round_key_bytes, 13));
 
-        state = _mm_aesdeclast_si128(state, load_round_key(expanded_key, 14));
+        state = _mm_aesdeclast_si128(state, rkb(round_key_bytes, 14));
         _mm_storeu_si128(output.as_mut_ptr() as *mut __m128i, state);
     }
 
@@ -193,28 +258,28 @@ mod aesni {
     pub unsafe fn decrypt_block_x4(
         input: &[u8; 64],
         output: &mut [u8; 64],
-        expanded_key: &[u32; EXPANDED_KEY_SIZE],
+        round_key_bytes: &[u8],
     ) {
         let mut s0 = _mm_loadu_si128(input[0..16].as_ptr() as *const __m128i);
         let mut s1 = _mm_loadu_si128(input[16..32].as_ptr() as *const __m128i);
         let mut s2 = _mm_loadu_si128(input[32..48].as_ptr() as *const __m128i);
         let mut s3 = _mm_loadu_si128(input[48..64].as_ptr() as *const __m128i);
 
-        let mut rk = load_round_key(expanded_key, 0);
+        let mut rk = rkb(round_key_bytes, 0);
         s0 = _mm_xor_si128(s0, rk);
         s1 = _mm_xor_si128(s1, rk);
         s2 = _mm_xor_si128(s2, rk);
         s3 = _mm_xor_si128(s3, rk);
 
         for r in 1..=13 {
-            rk = load_round_key(expanded_key, r);
+            rk = rkb(round_key_bytes, r);
             s0 = _mm_aesdec_si128(s0, rk);
             s1 = _mm_aesdec_si128(s1, rk);
             s2 = _mm_aesdec_si128(s2, rk);
             s3 = _mm_aesdec_si128(s3, rk);
         }
 
-        rk = load_round_key(expanded_key, 14);
+        rk = rkb(round_key_bytes, 14);
         s0 = _mm_aesdeclast_si128(s0, rk);
         s1 = _mm_aesdeclast_si128(s1, rk);
         s2 = _mm_aesdeclast_si128(s2, rk);
@@ -245,7 +310,7 @@ mod aesni {
 
         // Apply InvMixColumns to intermediate rounds via aesimc.
         for i in 1..num_rounds {
-            let rk = load_round_key(expanded_key, i);
+            let rk = load_round_key_from_words(expanded_key, i);
             let imc = _mm_aesimc_si128(rk);
             let mut bytes = [0u8; 16];
             _mm_storeu_si128(bytes.as_mut_ptr() as *mut __m128i, imc);
@@ -641,7 +706,7 @@ pub fn set_decryption_key(key: &[u8; 32], expanded_key: &mut [u32; EXPANDED_KEY_
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
-        if aesni::is_available() {
+        if use_aesni() {
             // SAFETY: we checked that AES-NI is available
             unsafe {
                 aesni::prepare_dec_key(expanded_key);
@@ -889,19 +954,18 @@ pub fn decrypt_block_soft(input: &[u8; 16], output: &mut [u8; 16], key: &[u32; E
 pub fn encrypt_block(
     input: &[u8; 16],
     output: &mut [u8; 16],
-    expanded_key: &[u32; EXPANDED_KEY_SIZE],
+    ek: &ExpandedKey,
 ) {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
-        if aesni::is_available() {
-            // SAFETY: we just checked availability
+        if use_aesni() {
             unsafe {
-                aesni::encrypt_block(input, output, expanded_key);
+                aesni::encrypt_block(input, output, &ek.round_key_bytes);
             }
             return;
         }
     }
-    encrypt_block_soft(input, output, expanded_key);
+    encrypt_block_soft(input, output, &ek.words);
 }
 
 /// Encrypt 4 blocks (64 bytes) simultaneously. Dispatches to AES-NI or software loop.
@@ -909,13 +973,13 @@ pub fn encrypt_block(
 pub fn encrypt_block_x4(
     input: &[u8; 64],
     output: &mut [u8; 64],
-    expanded_key: &[u32; EXPANDED_KEY_SIZE],
+    ek: &ExpandedKey,
 ) {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
-        if aesni::is_available() {
+        if use_aesni() {
             unsafe {
-                aesni::encrypt_block_x4(input, output, expanded_key);
+                aesni::encrypt_block_x4(input, output, &ek.round_key_bytes);
             }
             return;
         }
@@ -923,22 +987,22 @@ pub fn encrypt_block_x4(
     encrypt_block_soft(
         input[0..16].try_into().unwrap(),
         (&mut output[0..16]).try_into().unwrap(),
-        expanded_key,
+        &ek.words,
     );
     encrypt_block_soft(
         input[16..32].try_into().unwrap(),
         (&mut output[16..32]).try_into().unwrap(),
-        expanded_key,
+        &ek.words,
     );
     encrypt_block_soft(
         input[32..48].try_into().unwrap(),
         (&mut output[32..48]).try_into().unwrap(),
-        expanded_key,
+        &ek.words,
     );
     encrypt_block_soft(
         input[48..64].try_into().unwrap(),
         (&mut output[48..64]).try_into().unwrap(),
-        expanded_key,
+        &ek.words,
     );
 }
 
@@ -947,19 +1011,18 @@ pub fn encrypt_block_x4(
 pub fn decrypt_block(
     input: &[u8; 16],
     output: &mut [u8; 16],
-    expanded_key: &[u32; EXPANDED_KEY_SIZE],
+    ek: &ExpandedKey,
 ) {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
-        if aesni::is_available() {
-            // SAFETY: we just checked availability
+        if use_aesni() {
             unsafe {
-                aesni::decrypt_block(input, output, expanded_key);
+                aesni::decrypt_block(input, output, &ek.round_key_bytes);
             }
             return;
         }
     }
-    decrypt_block_soft(input, output, expanded_key);
+    decrypt_block_soft(input, output, &ek.words);
 }
 
 /// Decrypt 4 blocks (64 bytes) simultaneously. Dispatches to AES-NI or software loop.
@@ -967,13 +1030,13 @@ pub fn decrypt_block(
 pub fn decrypt_block_x4(
     input: &[u8; 64],
     output: &mut [u8; 64],
-    expanded_key: &[u32; EXPANDED_KEY_SIZE],
+    ek: &ExpandedKey,
 ) {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
-        if aesni::is_available() {
+        if use_aesni() {
             unsafe {
-                aesni::decrypt_block_x4(input, output, expanded_key);
+                aesni::decrypt_block_x4(input, output, &ek.round_key_bytes);
             }
             return;
         }
@@ -981,22 +1044,22 @@ pub fn decrypt_block_x4(
     decrypt_block_soft(
         input[0..16].try_into().unwrap(),
         (&mut output[0..16]).try_into().unwrap(),
-        expanded_key,
+        &ek.words,
     );
     decrypt_block_soft(
         input[16..32].try_into().unwrap(),
         (&mut output[16..32]).try_into().unwrap(),
-        expanded_key,
+        &ek.words,
     );
     decrypt_block_soft(
         input[32..48].try_into().unwrap(),
         (&mut output[32..48]).try_into().unwrap(),
-        expanded_key,
+        &ek.words,
     );
     decrypt_block_soft(
         input[48..64].try_into().unwrap(),
         (&mut output[48..64]).try_into().unwrap(),
-        expanded_key,
+        &ek.words,
     );
 }
 
@@ -1023,7 +1086,7 @@ mod tests {
 
         let ek = ExpandedKey::new_encrypt(&key);
         let mut output = [0u8; 16];
-        encrypt_block(&plaintext, &mut output, &ek.words);
+        encrypt_block(&plaintext, &mut output, &ek);
         assert_eq!(output, expected);
     }
 
@@ -1045,7 +1108,7 @@ mod tests {
 
         let dk = ExpandedKey::new_decrypt(&key);
         let mut output = [0u8; 16];
-        decrypt_block(&ciphertext, &mut output, &dk.words);
+        decrypt_block(&ciphertext, &mut output, &dk);
         assert_eq!(output, expected);
     }
 
@@ -1060,8 +1123,8 @@ mod tests {
         let mut encrypted = [0u8; 16];
         let mut decrypted = [0u8; 16];
 
-        encrypt_block(&plaintext, &mut encrypted, &ek.words);
-        decrypt_block(&encrypted, &mut decrypted, &dk.words);
+        encrypt_block(&plaintext, &mut encrypted, &ek);
+        decrypt_block(&encrypted, &mut decrypted, &dk);
 
         assert_eq!(plaintext, decrypted);
     }

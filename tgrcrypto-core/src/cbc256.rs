@@ -25,7 +25,7 @@ pub fn cbc256_encrypt_into(data: &[u8], key: &[u8; 32], iv: &mut [u8; 16], dest:
         }
 
         let mut out_block = [0u8; AES_BLOCK_SIZE];
-        aes256::encrypt_block(&block, &mut out_block, &ek.words);
+        aes256::encrypt_block(&block, &mut out_block, &ek);
 
         dest[i..i + AES_BLOCK_SIZE].copy_from_slice(&out_block);
         iv.copy_from_slice(&out_block);
@@ -88,7 +88,7 @@ fn cbc256_decrypt_internal(
         cipher_blocks.copy_from_slice(&data[i..i + 64]);
 
         let mut plain_blocks = [0u8; 64];
-        aes256::decrypt_block_x4(&cipher_blocks, &mut plain_blocks, &dk.words);
+        aes256::decrypt_block_x4(&cipher_blocks, &mut plain_blocks, dk);
 
         for j in 0..16 {
             dest[i + j] = plain_blocks[j] ^ prev_c[j];
@@ -112,7 +112,7 @@ fn cbc256_decrypt_internal(
         cipher_block.copy_from_slice(&data[i..i + 16]);
 
         let mut plain_block = [0u8; 16];
-        aes256::decrypt_block(&cipher_block, &mut plain_block, &dk.words);
+        aes256::decrypt_block(&cipher_block, &mut plain_block, dk);
 
         for j in 0..16 {
             dest[i + j] = plain_block[j] ^ prev_c[j];
@@ -148,6 +148,22 @@ mod tests {
         let key = [0x42u8; 32];
         let iv = [0x24u8; 16];
         let data: Vec<u8> = (0..128).map(|i| (i & 0xff) as u8).collect();
+
+        let mut enc_iv = iv;
+        let encrypted = cbc256_encrypt(&data, &key, &mut enc_iv);
+
+        let mut dec_iv = iv;
+        let decrypted = cbc256_decrypt(&encrypted, &key, &mut dec_iv);
+
+        assert_eq!(data, decrypted);
+    }
+
+    #[test]
+    fn test_cbc256_large_roundtrip() {
+        // Tests the parallel decryption path (> 256KB)
+        let key = [0x42u8; 32];
+        let iv = [0x24u8; 16];
+        let data: Vec<u8> = (0..512 * 1024).map(|i| (i & 0xff) as u8).collect();
 
         let mut enc_iv = iv;
         let encrypted = cbc256_encrypt(&data, &key, &mut enc_iv);
