@@ -8,6 +8,7 @@ use rayon::prelude::*;
 
 const PARALLEL_THRESHOLD: usize = 256 * 1024; // 256 KB
 const CHUNK_SIZE: usize = 64 * 1024; // 64 KB per thread
+const BYTE_MASK: u128 = u8::MAX as u128;
 
 /// Increment a 16-byte big-endian counter by 1.
 #[inline]
@@ -33,7 +34,7 @@ fn add_counter(iv: &[u8; 16], offset: u64) -> [u8; 16] {
     let mut k = AES_BLOCK_SIZE;
     while k > 0 && carry > 0 {
         k -= 1;
-        let sum = out[k] as u128 + (carry & 0xFF);
+        let sum = out[k] as u128 + (carry & BYTE_MASK);
         out[k] = sum as u8;
         carry = (carry >> 8) + (sum >> 8);
     }
@@ -218,10 +219,18 @@ pub fn ctr256_decrypt(data: &[u8], key: &[u8; 32], iv: &mut [u8; 16], state: &mu
 mod tests {
     use super::*;
 
+    fn test_key() -> [u8; 32] {
+        core::array::from_fn(|i| (i as u8).wrapping_mul(7).wrapping_add(0x42))
+    }
+
+    fn test_iv() -> [u8; 16] {
+        core::array::from_fn(|i| (i as u8).wrapping_mul(5).wrapping_add(0x24))
+    }
+
     #[test]
     fn test_ctr256_roundtrip() {
-        let key = [0x42u8; 32];
-        let iv = [0x24u8; 16];
+        let key = test_key();
+        let iv = test_iv();
         let data: Vec<u8> = (0..97).map(|i| (i & 0xff) as u8).collect();
 
         let mut enc_iv = iv;
@@ -237,8 +246,8 @@ mod tests {
 
     #[test]
     fn test_ctr256_chunked_matches_one_shot() {
-        let key = [0x42u8; 32];
-        let iv = [0x24u8; 16];
+        let key = test_key();
+        let iv = test_iv();
         let data: Vec<u8> = (0..97).map(|i| (i & 0xff) as u8).collect();
 
         let mut one_shot_iv = iv;
@@ -270,8 +279,8 @@ mod tests {
 
     #[test]
     fn test_ctr256_single_byte() {
-        let key = [0x42u8; 32];
-        let iv = [0x24u8; 16];
+        let key = test_key();
+        let iv = test_iv();
         let data = vec![0xABu8; 1];
 
         let mut enc_iv = iv;
@@ -299,7 +308,7 @@ mod tests {
     #[test]
     fn test_add_counter_carry() {
         let mut iv = [0u8; 16];
-        iv[15] = 0xFF;
+        iv[15] = u8::MAX;
         let result = add_counter(&iv, 1);
         assert_eq!(result[14], 1);
         assert_eq!(result[15], 0);

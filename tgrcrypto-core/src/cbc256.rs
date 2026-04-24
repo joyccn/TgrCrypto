@@ -143,10 +143,18 @@ pub fn cbc256_decrypt(data: &[u8], key: &[u8; 32], iv: &mut [u8; 16]) -> Vec<u8>
 mod tests {
     use super::*;
 
+    fn test_key() -> [u8; 32] {
+        core::array::from_fn(|i| (i as u8).wrapping_mul(7).wrapping_add(0x42))
+    }
+
+    fn test_iv() -> [u8; 16] {
+        core::array::from_fn(|i| (i as u8).wrapping_mul(5).wrapping_add(0x24))
+    }
+
     #[test]
     fn test_cbc256_roundtrip() {
-        let key = [0x42u8; 32];
-        let iv = [0x24u8; 16];
+        let key = test_key();
+        let iv = test_iv();
         let data: Vec<u8> = (0..128).map(|i| (i & 0xff) as u8).collect();
 
         let mut enc_iv = iv;
@@ -161,8 +169,8 @@ mod tests {
     #[test]
     fn test_cbc256_large_roundtrip() {
         // Tests the parallel decryption path (> 256KB)
-        let key = [0x42u8; 32];
-        let iv = [0x24u8; 16];
+        let key = test_key();
+        let iv = test_iv();
         let data: Vec<u8> = (0..512 * 1024).map(|i| (i & 0xff) as u8).collect();
 
         let mut enc_iv = iv;

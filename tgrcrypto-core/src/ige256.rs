@@ -134,10 +134,18 @@ pub fn ige256_decrypt(data: &[u8], key: &[u8; 32], iv: &[u8; 32]) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    fn test_key() -> [u8; 32] {
+        core::array::from_fn(|i| (i as u8).wrapping_mul(7).wrapping_add(0x42))
+    }
+
+    fn test_iv() -> [u8; 32] {
+        core::array::from_fn(|i| (i as u8).wrapping_mul(5).wrapping_add(0x24))
+    }
+
     #[test]
     fn test_ige_roundtrip() {
-        let key = [0x42u8; 32];
-        let iv = [0x24u8; 32];
+        let key = test_key();
+        let iv = test_iv();
         let data = vec![0xABu8; 64];
 
         let encrypted = ige256_encrypt(&data, &key, &iv);
@@ -148,8 +156,8 @@ mod tests {
 
     #[test]
     fn test_ige_chunked_matches_one_shot() {
-        let key = [0x42u8; 32];
-        let iv = [0x24u8; 32];
+        let key = test_key();
+        let iv = test_iv();
         let data: Vec<u8> = (0..96).map(|i| (i & 0xff) as u8).collect();
 
         let one_shot = ige256_encrypt(&data, &key, &iv);
@@ -168,16 +176,16 @@ mod tests {
     #[test]
     #[should_panic(expected = "multiple of 16 bytes")]
     fn test_ige_rejects_non_aligned() {
-        let key = [0x42u8; 32];
-        let iv = [0x24u8; 32];
+        let key = test_key();
+        let iv = test_iv();
         let data = vec![0u8; 15];
         ige256_encrypt(&data, &key, &iv);
     }
 
     #[test]
     fn test_ige_empty_is_allowed() {
-        let key = [0x42u8; 32];
-        let iv = [0x24u8; 32];
+        let key = test_key();
+        let iv = test_iv();
         let result = ige256_encrypt(b"", &key, &iv);
         assert_eq!(result, b"");
     }

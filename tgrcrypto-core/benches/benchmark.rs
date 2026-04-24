@@ -9,7 +9,7 @@ fn bench_ige256(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("ige256");
 
-    for size in [16, 1024, 65536, 1048576, 10485760].iter() {
+    for size in [1048576, 16777216, 67108864, 268435456].iter() {
         let data: Vec<u8> = (0..*size).map(|i| (i & 0xFF) as u8).collect();
 
         group.throughput(Throughput::Bytes(*size as u64));
@@ -33,7 +33,7 @@ fn bench_ctr256(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("ctr256");
 
-    for size in [16, 1024, 65536, 1048576, 10485760].iter() {
+    for size in [1048576, 16777216, 67108864, 268435456].iter() {
         let data: Vec<u8> = (0..*size).map(|i| (i & 0xFF) as u8).collect();
 
         group.throughput(Throughput::Bytes(*size as u64));
@@ -56,7 +56,7 @@ fn bench_cbc256(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("cbc256");
 
-    for size in [16, 1024, 65536, 1048576, 10485760].iter() {
+    for size in [1048576, 16777216, 67108864, 268435456].iter() {
         let data: Vec<u8> = (0..*size).map(|i| (i & 0xFF) as u8).collect();
 
         group.throughput(Throughput::Bytes(*size as u64));
