@@ -1,7 +1,7 @@
-//! AES-256 core implementation with hardware acceleration.
+//! AES-256 block primitive with runtime hardware dispatch.
 //!
-//! Uses AES-NI intrinsics on x86/x86_64 when available,
-//! falling back to an optimized T-table software implementation.
+//! When AES-NI is enabled and available on x86 or x86_64, encryption and
+//! decryption use the hardware path. Other targets use the software fallback.
 
 /// AES block size in bytes.
 pub const AES_BLOCK_SIZE: usize = 16;
@@ -18,11 +18,13 @@ const NK: usize = 8;
 /// Number of columns (32-bit words) comprising the state.
 const NB: usize = 4;
 
-/// An expanded AES-256 key, aligned for SIMD access.
+/// Expanded AES-256 key material, aligned for SIMD loads.
 ///
-/// Contains both the u32 word representation (for the software T-table path)
-/// and a pre-computed byte representation (for zero-overhead AES-NI round key
-/// loads). Sensitive key material is zeroized on drop.
+/// The struct keeps both representations needed by the two backends:
+/// - `words` for the software implementation
+/// - `round_key_bytes` for direct AES-NI round-key loads
+///
+/// Sensitive material is zeroized on drop.
 #[repr(align(16))]
 #[derive(Clone)]
 pub struct ExpandedKey {
@@ -31,11 +33,7 @@ pub struct ExpandedKey {
 }
 
 impl ExpandedKey {
-    /// Pre-compute the big-endian byte representation of all round keys.
-    ///
-    /// This eliminates the per-block byte-swap overhead on the AES-NI hot path
-    /// by converting the u32 word schedule into a flat byte array that can be
-    /// loaded directly with `_mm_loadu_si128`.
+    /// Build the flat byte schedule used by the AES-NI path.
     fn compute_round_key_bytes(&mut self) {
         for i in 0..EXPANDED_KEY_SIZE {
             let be = self.words[i].to_be_bytes();
@@ -81,15 +79,12 @@ impl Drop for ExpandedKey {
     }
 }
 
-/// Cached AES-NI availability check.
-///
-/// Performs the CPUID query once and caches the result in an atomic,
-/// eliminating per-block branch overhead.
+/// Cache the AES-NI feature check so block operations do not repeat CPUID.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[inline]
 fn use_aesni() -> bool {
     use std::sync::atomic::{AtomicU8, Ordering};
-    // 0 = not yet checked, 1 = not available, 2 = available
+    // 0 = unchecked, 1 = unavailable, 2 = available.
     static CACHED: AtomicU8 = AtomicU8::new(0);
     match CACHED.load(Ordering::Relaxed) {
         1 => false,
@@ -102,7 +97,7 @@ fn use_aesni() -> bool {
     }
 }
 
-// ─── AES-NI hardware path ────────────────────────────────────────────
+// AES-NI backend.
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod aesni {
@@ -126,19 +121,13 @@ mod aesni {
         }
     }
 
-    /// Load a pre-computed round key directly from the byte representation.
-    ///
-    /// This is the hot-path loader: a single unaligned SIMD load with zero
-    /// byte-swap overhead.
+    /// Load one round key from the flat byte schedule.
     #[inline(always)]
     unsafe fn rkb(round_key_bytes: &[u8], round: usize) -> __m128i {
         _mm_loadu_si128(round_key_bytes.as_ptr().add(round * 16) as *const __m128i)
     }
 
-    /// Convert 4 big-endian u32 round key words into an __m128i.
-    ///
-    /// Used only during key schedule preparation (not on the encryption/decryption
-    /// hot path). The per-block path uses `rkb()` with pre-computed bytes instead.
+    /// Convert one round key from the word schedule into an AES register.
     #[inline(always)]
     unsafe fn load_round_key_from_words(
         expanded_key: &[u32; EXPANDED_KEY_SIZE],
@@ -286,11 +275,7 @@ mod aesni {
         _mm_storeu_si128(output[48..64].as_mut_ptr() as *mut __m128i, s3);
     }
 
-    /// Convert encryption expanded key to AES-NI decryption key schedule.
-    ///
-    /// AES-NI requires reversed round keys with InvMixColumns on intermediate rounds.
-    /// We work in-place on the u32 array (reversing groups of 4 u32s = one round key),
-    /// then apply aesimc to intermediate round keys via byte conversion.
+    /// Convert the encryption schedule into the AES-NI decryption schedule.
     ///
     /// SAFETY: caller must ensure AES-NI is available.
     #[target_feature(enable = "aes", enable = "sse2")]
@@ -303,7 +288,7 @@ mod aesni {
             }
         }
 
-        // Apply InvMixColumns to intermediate rounds via aesimc.
+        // AES-NI expects InvMixColumns on the inner decryption round keys.
         for i in 1..num_rounds {
             let rk = load_round_key_from_words(expanded_key, i);
             let imc = _mm_aesimc_si128(rk);
@@ -321,9 +306,9 @@ mod aesni {
     }
 }
 
-// ─── Software T-table implementation ─────────────────────────────────
+// Software fallback.
 
-// Forward S-Box
+// Forward S-box.
 static SBOX: [u8; 256] = [
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
     0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
@@ -676,7 +661,7 @@ fn sub_word(word: u32) -> u32 {
     (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
 }
 
-// ─── Key schedule ────────────────────────────────────────────────────
+// Key schedule.
 
 /// Expand a 32-byte key into an encryption key schedule.
 pub fn set_encryption_key(key: &[u8; 32], expanded_key: &mut [u32; EXPANDED_KEY_SIZE]) {
@@ -729,7 +714,7 @@ pub fn set_decryption_key(key: &[u8; 32], expanded_key: &mut [u32; EXPANDED_KEY_
     }
 }
 
-// ─── Block encrypt / decrypt (software) ──────────────────────────────
+// Software block routines.
 
 /// Encrypt a single 16-byte block using the software T-table implementation.
 pub fn encrypt_block_soft(input: &[u8; 16], output: &mut [u8; 16], key: &[u32; EXPANDED_KEY_SIZE]) {
@@ -844,7 +829,6 @@ pub fn decrypt_block_soft(input: &[u8; 16], output: &mut [u8; 16], key: &[u32; E
     let mut s3 = get_u32_be(&input[12..]) ^ key[3];
 
     let mut ki = 4;
-    // Rounds 1-13
     for _ in 0..NR / 2 - 1 {
         let t0 = TD0[(s0 >> 24) as usize]
             ^ TD1[((s3 >> 16) & 0xff) as usize]
@@ -942,9 +926,9 @@ pub fn decrypt_block_soft(input: &[u8; 16], output: &mut [u8; 16], key: &[u32; E
     put_u32_be(&mut output[12..16], s3);
 }
 
-// ─── Dispatch layer ──────────────────────────────────────────────────
+// Public dispatch layer.
 
-/// Encrypt a single 16-byte block. Dispatches to AES-NI or software.
+/// Encrypt one 16-byte block.
 #[inline]
 pub fn encrypt_block(input: &[u8; 16], output: &mut [u8; 16], ek: &ExpandedKey) {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -959,7 +943,7 @@ pub fn encrypt_block(input: &[u8; 16], output: &mut [u8; 16], ek: &ExpandedKey) 
     encrypt_block_soft(input, output, &ek.words);
 }
 
-/// Encrypt 4 blocks (64 bytes) simultaneously. Dispatches to AES-NI or software loop.
+/// Encrypt four 16-byte blocks in one call.
 #[inline]
 pub fn encrypt_block_x4(input: &[u8; 64], output: &mut [u8; 64], ek: &ExpandedKey) {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -993,7 +977,7 @@ pub fn encrypt_block_x4(input: &[u8; 64], output: &mut [u8; 64], ek: &ExpandedKe
     );
 }
 
-/// Decrypt a single 16-byte block. Dispatches to AES-NI or software.
+/// Decrypt one 16-byte block.
 #[inline]
 pub fn decrypt_block(input: &[u8; 16], output: &mut [u8; 16], ek: &ExpandedKey) {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -1008,7 +992,7 @@ pub fn decrypt_block(input: &[u8; 16], output: &mut [u8; 16], ek: &ExpandedKey) 
     decrypt_block_soft(input, output, &ek.words);
 }
 
-/// Decrypt 4 blocks (64 bytes) simultaneously. Dispatches to AES-NI or software loop.
+/// Decrypt four 16-byte blocks in one call.
 #[inline]
 pub fn decrypt_block_x4(input: &[u8; 64], output: &mut [u8; 64], ek: &ExpandedKey) {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]

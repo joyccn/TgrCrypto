@@ -1,6 +1,6 @@
 //! AES-256-CBC (Cipher Block Chaining) mode.
 //!
-//! Used by Telegram for encrypted passport credentials.
+//! Telegram uses this mode for passport credentials.
 
 use crate::aes256::{self, ExpandedKey, AES_BLOCK_SIZE};
 use rayon::prelude::*;
@@ -8,13 +8,21 @@ use rayon::prelude::*;
 const PARALLEL_THRESHOLD: usize = 256 * 1024; // 256 KB
 const CHUNK_SIZE: usize = 64 * 1024; // 64 KB per thread
 
-/// Encrypt data in AES-256-CBC mode into a destination buffer.
+/// Encrypt aligned data into `dest` and update `iv` to the last ciphertext block.
+///
+/// # Panics
+///
+/// Panics if the buffers differ in length or if `data` is not a multiple of 16 bytes.
 pub fn cbc256_encrypt_into(data: &[u8], key: &[u8; 32], iv: &mut [u8; 16], dest: &mut [u8]) {
     let len = data.len();
     assert_eq!(len, dest.len(), "Source and destination lengths must match");
     if len == 0 {
         return;
     }
+    assert!(
+        len % AES_BLOCK_SIZE == 0,
+        "Data length must be a multiple of {AES_BLOCK_SIZE} bytes, got {len}",
+    );
 
     let ek = ExpandedKey::new_encrypt(key);
     let mut i = 0;
@@ -34,13 +42,21 @@ pub fn cbc256_encrypt_into(data: &[u8], key: &[u8; 32], iv: &mut [u8; 16], dest:
     }
 }
 
-/// Decrypt data in AES-256-CBC mode into a destination buffer.
+/// Decrypt aligned data into `dest` and update `iv` to the last ciphertext block.
+///
+/// # Panics
+///
+/// Panics if the buffers differ in length or if `data` is not a multiple of 16 bytes.
 pub fn cbc256_decrypt_into(data: &[u8], key: &[u8; 32], iv: &mut [u8; 16], dest: &mut [u8]) {
     let len = data.len();
     assert_eq!(len, dest.len(), "Source and destination lengths must match");
     if len == 0 {
         return;
     }
+    assert!(
+        len % AES_BLOCK_SIZE == 0,
+        "Data length must be a multiple of {AES_BLOCK_SIZE} bytes, got {len}",
+    );
 
     let dk = ExpandedKey::new_decrypt(key);
 
@@ -61,6 +77,7 @@ pub fn cbc256_decrypt_into(data: &[u8], key: &[u8; 32], iv: &mut [u8; 16], dest:
                 if chunk_idx == 0 {
                     local_iv.copy_from_slice(iv);
                 } else {
+                    // CBC decryption needs the previous ciphertext block as the local IV.
                     local_iv.copy_from_slice(&data[start - 16..start]);
                 }
 
@@ -71,7 +88,10 @@ pub fn cbc256_decrypt_into(data: &[u8], key: &[u8; 32], iv: &mut [u8; 16], dest:
     iv.copy_from_slice(&next_iv);
 }
 
-/// Internal sequential CBC decrypter with 4-way SIMD batched acceleration.
+/// Decrypt one aligned CBC slice.
+///
+/// `initial_iv` must be the ciphertext block that precedes `data`, or the
+/// external IV for the first slice.
 fn cbc256_decrypt_internal(
     data: &[u8],
     dest: &mut [u8],
@@ -125,14 +145,14 @@ fn cbc256_decrypt_internal(
     *initial_iv = prev_c;
 }
 
-/// Encrypt data in AES-256-CBC mode.
+/// Encrypt aligned data and return the ciphertext.
 pub fn cbc256_encrypt(data: &[u8], key: &[u8; 32], iv: &mut [u8; 16]) -> Vec<u8> {
     let mut out = vec![0u8; data.len()];
     cbc256_encrypt_into(data, key, iv, &mut out);
     out
 }
 
-/// Decrypt data in AES-256-CBC mode.
+/// Decrypt aligned data and return the plaintext.
 pub fn cbc256_decrypt(data: &[u8], key: &[u8; 32], iv: &mut [u8; 16]) -> Vec<u8> {
     let mut out = vec![0u8; data.len()];
     cbc256_decrypt_into(data, key, iv, &mut out);
@@ -168,7 +188,7 @@ mod tests {
 
     #[test]
     fn test_cbc256_large_roundtrip() {
-        // Tests the parallel decryption path (> 256KB)
+        // Exercises the parallel decryption path.
         let key = test_key();
         let iv = test_iv();
         let data: Vec<u8> = (0..512 * 1024).map(|i| (i & 0xff) as u8).collect();
@@ -180,5 +200,16 @@ mod tests {
         let decrypted = cbc256_decrypt(&encrypted, &key, &mut dec_iv);
 
         assert_eq!(data, decrypted);
+    }
+
+    #[test]
+    #[should_panic(expected = "multiple of 16 bytes")]
+    fn test_cbc256_rejects_non_aligned_input() {
+        let key = test_key();
+        let mut iv = test_iv();
+        let data = vec![0u8; 15];
+        let mut out = vec![0u8; data.len()];
+
+        cbc256_encrypt_into(&data, &key, &mut iv, &mut out);
     }
 }

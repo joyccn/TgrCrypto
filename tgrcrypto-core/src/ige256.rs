@@ -1,6 +1,6 @@
 //! AES-256-IGE (Infinite Garble Extension) mode.
 //!
-//! Used by Telegram MTProto v2.0 for message encryption.
+//! Telegram uses this mode for MTProto v2.0 message encryption.
 //!
 //! # Side-channel notice
 //!
@@ -10,17 +10,22 @@
 
 use crate::aes256::{self, ExpandedKey, AES_BLOCK_SIZE};
 
-/// Encrypt data in AES-256-IGE mode into a destination buffer.
+/// Encrypt aligned data into `dest`.
+///
+/// `iv` stores two 16-byte halves: the previous ciphertext block followed by
+/// the previous plaintext block. It is updated in place so callers can process
+/// data incrementally.
 ///
 /// # Panics
 ///
-/// Panics if `data` is not a multiple of 16 bytes (unless empty).
+/// Panics if the buffers differ in length or if `data` is not a multiple of
+/// 16 bytes.
 pub fn ige256_encrypt_into(data: &[u8], key: &[u8; 32], iv: &mut [u8; 32], dest: &mut [u8]) {
     let ek = ExpandedKey::new_encrypt(key);
     ige256_encrypt_into_ek(data, &ek, iv, dest);
 }
 
-/// Encrypt data in AES-256-IGE mode using a pre-expanded key.
+/// Encrypt aligned data using a pre-expanded key.
 pub fn ige256_encrypt_into_ek(data: &[u8], ek: &ExpandedKey, iv: &mut [u8; 32], dest: &mut [u8]) {
     let len = data.len();
     assert_eq!(len, dest.len(), "Source and destination lengths must match");
@@ -61,17 +66,18 @@ pub fn ige256_encrypt_into_ek(data: &[u8], ek: &ExpandedKey, iv: &mut [u8; 32], 
     iv[16..32].copy_from_slice(&iv2);
 }
 
-/// Decrypt data in AES-256-IGE mode into a destination buffer.
+/// Decrypt aligned data into `dest`.
 ///
 /// # Panics
 ///
-/// Panics if `data` is not a multiple of 16 bytes (unless empty).
+/// Panics if the buffers differ in length or if `data` is not a multiple of
+/// 16 bytes.
 pub fn ige256_decrypt_into(data: &[u8], key: &[u8; 32], iv: &mut [u8; 32], dest: &mut [u8]) {
     let dk = ExpandedKey::new_decrypt(key);
     ige256_decrypt_into_ek(data, &dk, iv, dest);
 }
 
-/// Decrypt data in AES-256-IGE mode using a pre-expanded key.
+/// Decrypt aligned data using a pre-expanded key.
 pub fn ige256_decrypt_into_ek(data: &[u8], dk: &ExpandedKey, iv: &mut [u8; 32], dest: &mut [u8]) {
     let len = data.len();
     assert_eq!(len, dest.len(), "Source and destination lengths must match");
@@ -114,7 +120,9 @@ pub fn ige256_decrypt_into_ek(data: &[u8], dk: &ExpandedKey, iv: &mut [u8; 32], 
     iv[16..32].copy_from_slice(&iv1);
 }
 
-/// Encrypt data in AES-256-IGE mode.
+/// Encrypt aligned data and return the ciphertext.
+///
+/// This helper clones the IV, so the caller's IV is left unchanged.
 pub fn ige256_encrypt(data: &[u8], key: &[u8; 32], iv: &[u8; 32]) -> Vec<u8> {
     let mut out = vec![0u8; data.len()];
     let mut iv_clone = *iv;
@@ -122,7 +130,9 @@ pub fn ige256_encrypt(data: &[u8], key: &[u8; 32], iv: &[u8; 32]) -> Vec<u8> {
     out
 }
 
-/// Decrypt data in AES-256-IGE mode.
+/// Decrypt aligned data and return the plaintext.
+///
+/// This helper clones the IV, so the caller's IV is left unchanged.
 pub fn ige256_decrypt(data: &[u8], key: &[u8; 32], iv: &[u8; 32]) -> Vec<u8> {
     let mut out = vec![0u8; data.len()];
     let mut iv_clone = *iv;

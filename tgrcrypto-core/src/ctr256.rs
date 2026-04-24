@@ -1,7 +1,9 @@
 //! AES-256-CTR (Counter) mode.
 //!
-//! Used by Telegram for CDN encrypted file downloads.
-//! Features stateful streaming support, SIMD batching, and Rayon multithreading.
+//! Telegram uses this mode for CDN-encrypted file downloads.
+//!
+//! The API supports stateful streaming by carrying both the counter block in
+//! `iv` and the byte offset inside the current keystream block in `state`.
 
 use crate::aes256::{self, ExpandedKey, AES_BLOCK_SIZE};
 use rayon::prelude::*;
@@ -41,7 +43,10 @@ fn add_counter(iv: &[u8; 16], offset: u64) -> [u8; 16] {
     out
 }
 
-/// Encrypt/decrypt data in AES-256-CTR into a destination buffer.
+/// Encrypt or decrypt data into `dest`.
+///
+/// `state` is the next byte offset inside the current keystream block and must
+/// be preserved between chunked calls.
 pub fn ctr256_encrypt_into(
     data: &[u8],
     key: &[u8; 32],
@@ -53,7 +58,11 @@ pub fn ctr256_encrypt_into(
     ctr256_encrypt_into_ek(data, &ek, iv, state, dest);
 }
 
-/// Encrypt/decrypt data in AES-256-CTR using a pre-expanded key.
+/// Encrypt or decrypt data using a pre-expanded key.
+///
+/// # Panics
+///
+/// Panics if the buffers differ in length or if `state` is not in `0..16`.
 pub fn ctr256_encrypt_into_ek(
     data: &[u8],
     ek: &ExpandedKey,
@@ -63,6 +72,11 @@ pub fn ctr256_encrypt_into_ek(
 ) {
     let len = data.len();
     assert_eq!(len, dest.len(), "Source and destination lengths must match");
+    assert!(
+        (*state as usize) < AES_BLOCK_SIZE,
+        "State must be in 0..{AES_BLOCK_SIZE}, got {}",
+        *state,
+    );
 
     if len == 0 {
         return;
@@ -75,6 +89,7 @@ pub fn ctr256_encrypt_into_ek(
 
     let mut processed = 0;
     if *state != 0 {
+        // Finish the partially used keystream block before parallelizing.
         let mut chunk = [0u8; 16];
         aes256::encrypt_block(iv, &mut chunk, ek);
         let rem = AES_BLOCK_SIZE - (*state as usize);
@@ -104,6 +119,8 @@ pub fn ctr256_encrypt_into_ek(
         let bulk_data = &rem_data[..bulk_len];
         let bulk_dest = &mut rem_dest[..bulk_len];
 
+        // Each chunk starts from the counter value it would have reached in the
+        // sequential stream, so the work can be split safely.
         bulk_data
             .par_chunks(CHUNK_SIZE)
             .zip(bulk_dest.par_chunks_mut(CHUNK_SIZE))
@@ -133,7 +150,9 @@ pub fn ctr256_encrypt_into_ek(
     }
 }
 
-/// Internal sequential CTR processor with 4-way SIMD batched acceleration.
+/// Process one CTR slice sequentially.
+///
+/// The caller is responsible for passing a valid `state` in `0..16`.
 fn ctr256_encrypt_internal(
     data: &[u8],
     dest: &mut [u8],
@@ -159,7 +178,7 @@ fn ctr256_encrypt_internal(
         }
     }
 
-    // 4-block SIMD interleaved path
+    // Batch four counter blocks to reuse the x4 AES primitive.
     while i + 64 <= len {
         let mut ivs = [0u8; 64];
 
@@ -204,6 +223,7 @@ fn ctr256_encrypt_internal(
     }
 }
 
+/// Encrypt data and return the ciphertext.
 pub fn ctr256_encrypt(data: &[u8], key: &[u8; 32], iv: &mut [u8; 16], state: &mut u8) -> Vec<u8> {
     let mut out = vec![0u8; data.len()];
     ctr256_encrypt_into(data, key, iv, state, &mut out);
@@ -211,6 +231,7 @@ pub fn ctr256_encrypt(data: &[u8], key: &[u8; 32], iv: &mut [u8; 16], state: &mu
 }
 
 #[inline]
+/// Decrypt data and return the plaintext.
 pub fn ctr256_decrypt(data: &[u8], key: &[u8; 32], iv: &mut [u8; 16], state: &mut u8) -> Vec<u8> {
     ctr256_encrypt(data, key, iv, state)
 }
@@ -312,5 +333,17 @@ mod tests {
         let result = add_counter(&iv, 1);
         assert_eq!(result[14], 1);
         assert_eq!(result[15], 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "State must be in 0..16")]
+    fn test_ctr256_rejects_invalid_state() {
+        let key = test_key();
+        let mut iv = test_iv();
+        let mut state = 16u8;
+        let data = [0u8; 1];
+        let mut out = [0u8; 1];
+
+        ctr256_encrypt_into(&data, &key, &mut iv, &mut state, &mut out);
     }
 }
