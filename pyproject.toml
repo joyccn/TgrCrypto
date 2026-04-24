@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "TgrCrypto"
-version = "1.1.0"
+version = "1.1.1"
 description = "High-Performance Cryptography Extension Library for Kurigram"
 readme = "README.md"
 requires-python = ">=3.9,<3.15"
